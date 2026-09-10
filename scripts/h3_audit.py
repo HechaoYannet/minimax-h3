@@ -227,8 +227,12 @@ def plan_shape(height, width, num_frames, steps, text_len, refs, edges,
 
 
 # --------------------------------------------------------------------------- presets
+# The two ends of the frontier, and the points in between.  The "speed" numbers
+# are measured end to end in cache/sweep/speed.json -- see README section 11.
 PRESETS = [
-    # name,        h,   w, frames, steps, refs,                             img_edge, vid_edge
+    # ---- speed end: "give me something now" ------------------------------
+    ("blitz",     384,  640,    22,    8, [("image", 1024, 1024)],             256, 384),
+    ("fast",      384,  640,    39,   10, [("image", 1024, 1024)],             256, 384),
     ("draft",     384,  640,    73,   20, [("image", 1024, 1024)],             768, 384),
     ("preview",   480,  832,    73,   30, [("image", 1024, 1024)],            1024, 384),
     ("standard",  480,  832,   124,   30, [("image", 1024, 1024)],            1024, 512),
@@ -236,6 +240,12 @@ PRESETS = [
     ("text-only", 480,  832,   124,   30, [],                                    0,   0),
     ("video-edit", 480, 832,   124,   30, [("video_audio", 832, 480, 124)],      0, 384),
     ("max-native", 768, 1344,  124,   50, [("image", 1024, 1024)],            1024, 512),
+    # ---- capability end: "make it good, take the time" -------------------
+    # 640x384x243 is the longest clip verified to run on this box (10.12 s of
+    # video).  832x480x243 and 640x384x345 both exceed the 8 GiB card.  Keep
+    # --dit-onload disk for this preset: materialising the DiT in host RAM on
+    # top of the encoder is what has twice taken the WSL distro down.
+    ("max-long",  384,  640,   243,   30, [("image", 1024, 1024)],             768, 384),
 ]
 
 

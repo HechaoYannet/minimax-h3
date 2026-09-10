@@ -75,6 +75,27 @@ def log(msg):
     print(f"[h3 {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+# Timings of the four stages, filled in as main() runs and emitted by --bench.
+# Kept module-level so the --bench path can print one machine-readable record
+# per configuration without threading a dict through every helper.
+BENCH = {}
+
+
+def timeit(name):
+    """Context manager: record the wall time of one stage under BENCH[name]."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _cm():
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            BENCH[name] = round(time.perf_counter() - t0, 2)
+
+    return _cm()
+
+
 def load_plan():
     path = os.path.join(WS, "cache", "plan.json")
     if os.path.exists(path):
@@ -239,6 +260,73 @@ def build_pipeline(plan, want, vram_limit, dit_onload="cpu"):
     pipe.vram_management_enabled = pipe.check_vram_management_state()
     return pipe
 
+
+# The generic attention path (audio VAE, and anything else that is not the DiT)
+# must NOT be left to automatic selection and must NOT be pinned to cuDNN:
+#
+#     default (no forcing)   FAILED  RuntimeError: No available kernel
+#     CUDNN_ATTENTION        FAILED  RuntimeError: No available kernel
+#     MATH                   FAILED  CUDA driver error: device not ready
+#     FLASH_ATTENTION        OK
+#
+# measured on the audio VAE's causal attention inside a real pipeline run.
+GENERIC_ATTENTION_BACKEND = "FLASH_ATTENTION"
+
+
+def prefer_sdpa_backend(name):
+    """Pin the SDPA backends the two attention paths each actually need.
+
+    Two different attention paths live in one pipeline call:
+
+      * the DiT, through `MiniMaxH3DiT._sdpa_varlen_attention`;
+      * everything else (notably the audio VAE's `CausalAttention`), through the
+        generic `diffsynth.core.attention.attention_forward` -> `torch_sdpa`.
+
+    Forcing one backend around the whole call breaks the second one.  Measured on
+    the audio VAE's causal attention, in a real pipeline:
+
+        default (no forcing)   FAILED  RuntimeError: No available kernel
+        CUDNN_ATTENTION        FAILED  RuntimeError: No available kernel
+        MATH                   FAILED  CUDA driver error: device not ready
+        FLASH_ATTENTION        OK
+
+    (MATH materialises the full attention matrix and OOMs at these lengths.)  So
+    every `--ref-audio` / `--ref-video-audio` run used to die here, while the
+    image-only path never touched it.
+
+    `torch.backends.cuda.sdp_kernel` is deprecated and no longer accepts
+    enable_* flags, and `sdpa_kernel` is a context manager that would have to be
+    re-entered inside every attention call -- so instead push the chosen backend
+    to the front of `torch.nn.attention.SDPBackend`'s member order, which is what
+    `_get_priority` walks when it builds the candidate list in the
+    priority=0 path.  This changes only the ORDER of automatic selection: the
+    other backends stay enabled as fallbacks, unlike sdpa_kernel.
+    """
+    import importlib
+
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    # The generic path always gets the backend known to work there; the caller's
+    # --sdpa-backend chooses only what the DiT uses.
+    backend = getattr(SDPBackend, GENERIC_ATTENTION_BACKEND)
+    module = importlib.import_module("diffsynth.core.attention.attention")
+    if getattr(module, "_h3_backend_pinned", None) is backend:
+        return
+    original = getattr(module, "_h3_original_torch_sdpa", None)
+    if original is None:
+        original = module.torch_sdpa
+        module._h3_original_torch_sdpa = original
+    # `sdpa_kernel` is a re-entrant, thread-local override, so entering it per
+    # call is cheap and, unlike the module-level default, does not leak into the
+    # framework modules that were compiled against a different backend.
+    def torch_sdpa_pinned(*a, **kw):
+        with sdpa_kernel(backend):
+            return original(*a, **kw)
+
+    module.torch_sdpa = torch_sdpa_pinned
+    module._h3_backend_pinned = backend
+    log(f"  SDPA: generic attention path pinned to {GENERIC_ATTENTION_BACKEND}, "
+        f"DiT uses {name or 'auto'}")
 
 def _install_encoder_trace(pipe):
     """Print free VRAM after every vision block / decoder layer (H3_TRACE_ENCODER=1).
@@ -426,11 +514,24 @@ def install_cached_prompt_embedder(pipe, embeds, tags):
 
 
 def timed_progress(steps, state):
+    """Yield the steps, recording a steady-state s/step into BENCH.
+
+    The first steps are cold: the disk-map page cache warms up and the allocator
+    settles, so step 1 runs visibly slower than the rest.  Averaging from step 0
+    therefore understates throughput, which matters when --bench compares
+    configurations.  Record the LAST inter-step delta instead -- by then every
+    configuration is in the same warm regime."""
     def factory(iterable):
         t0 = [time.perf_counter()]
+        last = [time.perf_counter()]
         for i, x in enumerate(iterable):
+            now = time.perf_counter()
             if i > 0:
-                dt = (time.perf_counter() - t0[0]) / i
+                BENCH["step_s_last"] = round(now - last[0], 2)
+                BENCH["step_s_mean"] = round((now - t0[0]) / i, 2)
+            last[0] = now
+            if i > 0 and not state.get("quiet"):
+                dt = (now - t0[0]) / i
                 alloc = torch.cuda.memory_allocated() / 1024 ** 3
                 reserved = torch.cuda.memory_reserved() / 1024 ** 3
                 peak = torch.cuda.max_memory_allocated() / 1024 ** 3
@@ -653,6 +754,10 @@ def main():
                       help="load every model and exercise the offload/onload plumbing, then "
                            "exit WITHOUT running any denoising step (validates the vram_config)")
     misc.add_argument("--json", action="store_true")
+    misc.add_argument("--bench", action="store_true",
+                      help="run the whole pipeline, print ONE machine-readable "
+                           "'BENCH {json}' record, write no video")
+    misc.add_argument("--label", default=None, help="label for the --bench record")
     args = ap.parse_args()
 
     plan = load_plan()
@@ -673,6 +778,22 @@ def main():
     tile_overlap = args.tile_overlap if args.tile_overlap is not None else vae.get("tile_overlap", 64)
     tiled = not args.no_tiled
 
+    # The framework silently snaps the shape onto its own grid (MiniMaxH3Unit_
+    # ShapeChecker -> check_resize_height_width) and returns a DIFFERENT clip
+    # length than you asked for.  That is fine for a preset the planner already
+    # aligned, but when the shape comes from the command line a typo turns into a
+    # silently different run -- which is exactly how a 328-frame (illegal) sweep
+    # point became a 345-frame (legal, much bigger) one and OOMed.  Snap here,
+    # loudly, so the log records what will really be generated.
+    def _snap(v, mult, rem):
+        return v if v % mult == rem else ((v - rem + mult - 1) // mult) * mult + rem
+
+    if height % 32 or width % 32 or num_frames % 17 != 5:
+        h2, w2, f2 = _snap(height, 32, 0), _snap(width, 32, 0), _snap(num_frames, 17, 5)
+        log(f"shape {width}x{height}x{num_frames}f is off the framework grid "
+            f"(h,w %32==0; frames %17==5) -> {w2}x{h2}x{f2}f")
+        height, width, num_frames = h2, w2, f2
+
     prompt = args.prompt
     if prompt is None and args.prompt_file:
         prompt = open(args.prompt_file, encoding="utf-8").read().strip()
@@ -686,7 +807,8 @@ def main():
     if args.ref_specs and not args.dry_run and not args.load_only:
         log(f"decoding {len(args.ref_specs)} reference(s); the order below defines "
             f"the <Image n>/<Video n>/<Audio n> labels in the prompt")
-        references = build_references(args.ref_specs, height, width, num_frames)
+        with timeit("decode_refs_s"):
+            references = build_references(args.ref_specs, height, width, num_frames)
 
     summary = {"preset": args.preset, "height": height, "width": width,
                "num_frames": num_frames, "steps": steps, "seed": args.seed,
@@ -833,8 +955,9 @@ def main():
     if need_encoder:
         log("running the text encoder (26 B params, streamed from disk)")
         t0 = time.perf_counter()
-        embeds, tags = compute_text_embedding(pipe, prompt, references, height, width,
-                                              num_frames, edges)
+        with timeit("text_encode_s"):
+            embeds, tags = compute_text_embedding(pipe, prompt, references, height, width,
+                                                  num_frames, edges)
         log(f"text embedding done in {time.perf_counter()-t0:.1f} s"
             f" -> {tuple(embeds.shape)} embeds, vision tokens {(tags == 0).sum().item()}")
         if use_cache or args.cache_text_only:
@@ -850,18 +973,33 @@ def main():
 
     # ---- denoise + decode --------------------------------------------------
     backend = {"cudnn": "CUDNN_ATTENTION", "flash": "FLASH_ATTENTION",
-               "efficient": "EFFICIENT_ATTENTION"}.get(args.sdpa_backend)
+               "efficient": "EFFICIENT_ATTENTION", "auto": None}.get(args.sdpa_backend)
+    # Set the preference once, process-wide, instead of wrapping the pipeline call
+    # in sdpa_kernel -- forcing one backend for the whole call is what broke every
+    # audio-carrying reference.  See prefer_sdpa_backend().
+    prefer_sdpa_backend(backend)
     log(f"denoising: {width}x{height}x{num_frames}f, {steps} steps, seed {args.seed},"
         f" sdpa={args.sdpa_backend or 'auto'}")
     torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
-    ctx = None
-    if backend:
-        from torch.nn.attention import SDPBackend, sdpa_kernel
-        ctx = sdpa_kernel(getattr(SDPBackend, backend))
+    _mark = {}
+    # The pipeline decodes inside the same call, so split denoise from decode by
+    # wrapping the model swap: the first load_models_to_device(["video_vae", ...])
+    # after the unit chain IS the denoise/decode boundary.
+    from diffsynth.pipelines.minimax_h3_audio_video import MiniMaxH3Pipeline as _P
+    _orig_swap = _P.load_models_to_device
+    _seen_ref = [False]
+
+    def _counting_swap(self, names):
+        if "video_vae" in names and not _seen_ref[0]:
+            _seen_ref[0] = True            # the ReferenceEncoder pass, not the decode
+        elif "video_vae" in names and "denoise_s" not in _mark:
+            _mark["denoise_s"] = round(time.perf_counter() - t0, 2)
+            _mark["_decode_t0"] = time.perf_counter()
+        return _orig_swap(self, names)
+
+    _P.load_models_to_device = _counting_swap
     try:
-        if ctx is not None:
-            ctx.__enter__()
         video, audio = pipe(
             prompt=None, text_embedding=None,
             height=height, width=width, num_frames=num_frames,
@@ -871,15 +1009,40 @@ def main():
             audio_flow_shift=resolved.get("denoise", {}).get("audio_flow_shift", 3.0),
             references=references,
             tiled=tiled, tile_size=tile_size, tile_overlap=tile_overlap,
-            progress_bar_cmd=timed_progress(steps, {}),
+            progress_bar_cmd=timed_progress(steps, {"quiet": args.bench and args.label}),
             **edges,
         )
+        torch.cuda.synchronize()
+        _mark["decode_s"] = round(time.perf_counter() - _mark.get("_decode_t0", t0), 2)
+        BENCH.update(_mark)
     finally:
-        if ctx is not None:
-            ctx.__exit__(None, None, None)
+        _P.load_models_to_device = _orig_swap
     dt = time.perf_counter() - t0
+    peak = torch.cuda.max_memory_allocated() / 1024 ** 3
     log(f"generation finished in {dt/60:.1f} min"
-        f" ({dt/steps:.1f} s/step), peak VRAM {torch.cuda.max_memory_allocated()/1024**3:.2f} GiB")
+        f" ({dt/steps:.1f} s/step), peak VRAM {peak:.2f} GiB")
+
+    if args.bench:
+        BENCH.pop("_decode_t0", None)
+        rec = {
+            "label": args.label or f"{width}x{height}x{num_frames}_{steps}st",
+            "height": height, "width": width, "num_frames": num_frames,
+            "frames_out": len(video), "seconds_out": round(len(video) / 24.0, 2),
+            "steps": steps, "seed": args.seed,
+            "ref_image_short_edge": img_edge,
+            "ref_specs": [{"kind": k, "path": os.path.basename(p)} for k, p in args.ref_specs],
+            "text_cache": "hit" if not need_encoder else "miss",
+            "seq_len_predicted": (p or {}).get("rows", {}).get("seq_len"),
+            "total_s": round(dt, 2),
+            "s_per_step": round(dt / steps, 2),
+            "peak_vram_gib": round(peak, 2),
+            "vram_limit_gib": vram_limit,
+            "scheduler": mode,
+            "sdpa": args.sdpa_backend,
+            **BENCH,
+        }
+        print("BENCH " + json.dumps(rec, sort_keys=True), flush=True)
+        return 0
 
     out = args.out or os.path.join(WS, "outputs",
                                    f"h3_{args.preset or 'custom'}_{args.seed}.mp4")

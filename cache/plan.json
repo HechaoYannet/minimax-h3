@@ -187,6 +187,120 @@
     "dit_params_linear": 20038287360.0
   },
   "presets": {
+    "blitz": {
+      "requested": {
+        "height": 384,
+        "width": 640,
+        "num_frames": 22,
+        "steps": 8
+      },
+      "aligned": {
+        "height": 384,
+        "width": 640,
+        "num_frames": 22,
+        "seconds": 0.92,
+        "latent_t": 7,
+        "latent_h": 24,
+        "latent_w": 40,
+        "audio_latent_t": 37
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 64,
+        "ref_video": 0,
+        "ref_audio": 0,
+        "target_audio": 74,
+        "target_video": 1680,
+        "used": 2918,
+        "seq_len": 2944
+      },
+      "ref_image_latents": [
+        [
+          1024,
+          1024,
+          16,
+          16
+        ]
+      ],
+      "ref_video_latents": [],
+      "linear_tflop_per_step": 118.0,
+      "linear_s_per_step": 2.65,
+      "attn_s_per_step": 0.26,
+      "attn_share": 0.09,
+      "step_s": 2.91,
+      "steps": 8,
+      "denoise_s": 23.3,
+      "denoise_min": 0.4,
+      "wallclock_per_output_second": 25.4,
+      "note": "blitz",
+      "refs": [
+        [
+          "image",
+          1024,
+          1024
+        ]
+      ],
+      "ref_image_short_edge": 256,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048
+    },
+    "fast": {
+      "requested": {
+        "height": 384,
+        "width": 640,
+        "num_frames": 39,
+        "steps": 10
+      },
+      "aligned": {
+        "height": 384,
+        "width": 640,
+        "num_frames": 39,
+        "seconds": 1.62,
+        "latent_t": 12,
+        "latent_h": 24,
+        "latent_w": 40,
+        "audio_latent_t": 65
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 64,
+        "ref_video": 0,
+        "ref_audio": 0,
+        "target_audio": 130,
+        "target_video": 2880,
+        "used": 4174,
+        "seq_len": 4224
+      },
+      "ref_image_latents": [
+        [
+          1024,
+          1024,
+          16,
+          16
+        ]
+      ],
+      "ref_video_latents": [],
+      "linear_tflop_per_step": 169.3,
+      "linear_s_per_step": 3.8,
+      "attn_s_per_step": 0.54,
+      "attn_share": 0.125,
+      "step_s": 4.35,
+      "steps": 10,
+      "denoise_s": 43.5,
+      "denoise_min": 0.7,
+      "wallclock_per_output_second": 26.7,
+      "note": "fast",
+      "refs": [
+        [
+          "image",
+          1024,
+          1024
+        ]
+      ],
+      "ref_image_short_edge": 256,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048
+    },
     "draft": {
       "requested": {
         "height": 384,
@@ -564,6 +678,63 @@
       "denoise_min": 70.1,
       "wallclock_per_output_second": 814.5,
       "note": "max-native",
+      "refs": [
+        [
+          "image",
+          1024,
+          1024
+        ]
+      ],
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 512,
+      "ref_video_max_pixels": 344064
+    },
+    "max-long": {
+      "requested": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 243,
+        "steps": 40
+      },
+      "aligned": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 243,
+        "seconds": 10.12,
+        "latent_t": 72,
+        "latent_h": 30,
+        "latent_w": 52,
+        "audio_latent_t": 405
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 1024,
+        "ref_video": 0,
+        "ref_audio": 0,
+        "target_audio": 810,
+        "target_video": 28080,
+        "used": 31014,
+        "seq_len": 31040
+      },
+      "ref_image_latents": [
+        [
+          1024,
+          1024,
+          64,
+          64
+        ]
+      ],
+      "ref_video_latents": [],
+      "linear_tflop_per_step": 1244.0,
+      "linear_s_per_step": 27.95,
+      "attn_s_per_step": 29.25,
+      "attn_share": 0.511,
+      "step_s": 57.2,
+      "steps": 40,
+      "denoise_s": 2288.1,
+      "denoise_min": 38.1,
+      "wallclock_per_output_second": 226.0,
+      "note": "max-long",
       "refs": [
         [
           "image",
