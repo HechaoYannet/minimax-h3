@@ -1,0 +1,165 @@
+{
+  "results": [
+    {
+      "name": "AutoProcessor.from_pretrained(local, local_files_only=True)",
+      "pass": true,
+      "detail": "class          Qwen3VLProcessor\nimage proc     Qwen2VLImageProcessor  merge_size=2\nvideo proc     Qwen3VLVideoProcessor\ntokenizer      Qwen2Tokenizer  vocab=151643"
+    },
+    {
+      "name": "presentation_t2va",
+      "pass": true,
+      "detail": "text tokens    43   tags=[1]\n(a 72-char Chinese prompt -> 43 tokens)"
+    },
+    {
+      "name": "image_token_counts + presentation_ref2va",
+      "pass": true,
+      "detail": "image_grid_thw [[1, 64, 64]]   image token count [1024]\ntotal tokens   1075   text-tagged=49 vision-tagged=1026\ntext tokens without the <Picture 1> block = 45 (approx)"
+    },
+    {
+      "name": "_resolve_reference_image_shape",
+      "pass": true,
+      "detail": "short_edge= 2048 -> canvas 2048x2048 -> latent 128x128 ->  4096 rows\nshort_edge= 1536 -> canvas 1536x1536 -> latent 96x96 ->  2304 rows\nshort_edge= 1024 -> canvas 1024x1024 -> latent 64x64 ->  1024 rows\nshort_edge=  768 -> canvas 768x768 -> latent 48x48 ->   576 rows\nshort_edge=  512 -> canvas 512x512 -> latent 32x32 ->   256 rows"
+    },
+    {
+      "name": "_resolve_reference_video_shape + _trim_reference_video_length",
+      "pass": true,
+      "detail": "short_edge=  768 -> canvas 960x544 -> 124 frames -> 37 latent frames ->  18870 rows\nshort_edge=  512 -> canvas 768x448 -> 124 frames -> 37 latent frames ->  12432 rows\nshort_edge=  384 -> canvas 672x384 -> 124 frames -> 37 latent frames ->   9324 rows\nshort_edge=  256 -> canvas 448x256 -> 124 frames -> 37 latent frames ->   4144 rows"
+    },
+    {
+      "name": "sample_qwen_video_frames",
+      "pass": true,
+      "detail": "124 source frames -> 11 sampled, 6 temporal blocks (presentation may insert up to 22 extra vision tokens)"
+    },
+    {
+      "name": "MiniMaxH3Unit_PackedSequenceBuilder.process",
+      "pass": true,
+      "detail": "  text_len = 1075 tokens (from the real tokenizer, 1024x1024 ref @ short_edge=1024)\n             shape   text  refimg  tgt vid  tgt aud    used  seq_len\n        640x384x73   1075     576     5280      244    7175     7232\n        832x480x73   1075    1024     8580      244   10923    10944\n       832x480x124   1075    1024    14430      414   16943    16960\n      1024x576x124   1075    1024    21312      414   23825    23872\n      1344x768x124   1075    1024    37296      414   39809    39872"
+    },
+    {
+      "name": "architecture quantization decision == deployed tensors",
+      "pass": true,
+      "detail": "  dit           stored: quantized= 416  bf16-weight= 266  exclude_patterns=8\n      architecture: 208 Linear -> quantized, 56 -> fp\n      quantized-in-arch but NOT packed in file : 0\n      fp-in-arch but PACKED in file            : 0\n      exclude patterns that match no layer in this variant (benign, shared across variants): ['time_embedder.proj_in', 'time_embedder.proj_out']\n      quantized params 20.038 B in  9.33 GiB packed -> 0.5000 byte/param\n  text_encoder  stored: quantized= 700  bf16-weight= 377  exclude_patterns=4\n      architecture: 350 Linear -> quantized, 116 -> fp\n      quantized-in-arch but NOT packed in file : 0\n      fp-in-arch but PACKED in file            : 0\n      quantized params 24.379 B in 11.35 GiB packed -> 0.5000 byte/param\n  video_vae     stored: quantized= 290  bf16-weight= 134  exclude_patterns=1\n      (model class not instantiated here; file-level check only)\n  audio_vae     stored: quantized=  12  bf16-weight=   7  exclude_patterns=0\n      (model class not instantiated here; file-level check only)"
+    },
+    {
+      "name": "prompt-cache path supplies every unit input",
+      "pass": true,
+      "detail": "9 units checked up to and including PromptEmbedder; every declared input is either supplied by the cache-path dict or produced by an earlier unit\n    left as None (same as MiniMaxH3Pipeline.__call__): MiniMaxH3Unit_InputVideoEmbedder: ['input_video']; MiniMaxH3Unit_InputAudioEmbedder: ['input_audio']"
+    },
+    {
+      "name": "scheduler: beta vs flow sigma grids",
+      "pass": true,
+      "detail": "  flow  video 30 steps shift=12.000 sigma 1.0000 -> 0.2927 -> 0   audio shift=3.000 -> 0.0938\n  beta  video 30 steps shift=12.000 sigma 1.0000 -> 0.0780 -> 0   audio shift=3.000 -> 0.0207\n  video final sigma: flow 0.2927 -> beta 0.0780 (27%); beta concentrates steps at both ends"
+    },
+    {
+      "name": "plan kwargs are valid pipeline arguments",
+      "pass": true,
+      "detail": "__call__ accepts every planned kwarg (13 checked)\npipeline time_division_factor=17, remainder=5, height/width division=32\nin_iteration_models=('dit', 'controlnet')"
+    }
+  ],
+  "packed": [
+    {
+      "shape": "640x384x73",
+      "text": 1075,
+      "ref_image_short_edge": 768,
+      "ref_image_rows": 576,
+      "target_video_rows": 5280,
+      "target_audio_rows": 244,
+      "used": 7175,
+      "seq_len": 7232,
+      "img_pos": 5856,
+      "audio_pos": 244,
+      "tags_present": [
+        -1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "shape": "832x480x73",
+      "text": 1075,
+      "ref_image_short_edge": 1024,
+      "ref_image_rows": 1024,
+      "target_video_rows": 8580,
+      "target_audio_rows": 244,
+      "used": 10923,
+      "seq_len": 10944,
+      "img_pos": 9604,
+      "audio_pos": 244,
+      "tags_present": [
+        -1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "shape": "832x480x124",
+      "text": 1075,
+      "ref_image_short_edge": 1024,
+      "ref_image_rows": 1024,
+      "target_video_rows": 14430,
+      "target_audio_rows": 414,
+      "used": 16943,
+      "seq_len": 16960,
+      "img_pos": 15454,
+      "audio_pos": 414,
+      "tags_present": [
+        -1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "shape": "1024x576x124",
+      "text": 1075,
+      "ref_image_short_edge": 1024,
+      "ref_image_rows": 1024,
+      "target_video_rows": 21312,
+      "target_audio_rows": 414,
+      "used": 23825,
+      "seq_len": 23872,
+      "img_pos": 22336,
+      "audio_pos": 414,
+      "tags_present": [
+        -1,
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "shape": "1344x768x124",
+      "text": 1075,
+      "ref_image_short_edge": 1024,
+      "ref_image_rows": 1024,
+      "target_video_rows": 37296,
+      "target_audio_rows": 414,
+      "used": 39809,
+      "seq_len": 39872,
+      "img_pos": 38320,
+      "audio_pos": 414,
+      "tags_present": [
+        -1,
+        0,
+        1,
+        2
+      ]
+    }
+  ],
+  "census": {
+    "dit": {
+      "quantized_linears": 208,
+      "fp_linears": 56,
+      "quantized_params": 20038287360,
+      "packed_weight_bytes": 10019143680
+    },
+    "text_encoder": {
+      "quantized_linears": 350,
+      "fp_linears": 116,
+      "quantized_params": 24379392000,
+      "packed_weight_bytes": 12189696000
+    }
+  }
+}

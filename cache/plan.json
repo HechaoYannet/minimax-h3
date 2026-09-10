@@ -1,0 +1,670 @@
+{
+  "models": {
+    "dit": {
+      "key": "dit",
+      "name": "minimax-h3-ref2va-pruned-nf4.safetensors",
+      "path": "/home/yhc/source/minimax-h3/models/minimax-h3-ref2va-pruned-nf4.safetensors",
+      "expect_registered": true,
+      "size_bytes": 10483868417,
+      "tensor_count": 1572,
+      "dtype_bytes": {
+        "F32": 5118464,
+        "BF16": 146302768,
+        "U8": 10332277705
+      },
+      "top_level_bytes": {
+        "token_refiner": 397646946,
+        "blocks.16": 200559923,
+        "blocks.0": 200559922,
+        "blocks.11": 200559922,
+        "blocks.21": 200559922,
+        "blocks.29": 200559922,
+        "blocks.37": 200559922,
+        "blocks.6": 200559922,
+        "blocks.7": 200559922,
+        "blocks.10": 200559921
+      },
+      "hash": "072bd13242d6d67df79a154e7c4274b3",
+      "matched_model_name": "minimax_h3_dit",
+      "matched_model_class": "diffsynth.models.minimax_h3_dit_comfy.MiniMaxH3DiTComfyPruned",
+      "matched_quant": {
+        "method": "bitsandbytes_nf4",
+        "load_prequantized": true,
+        "exclude_modules": [
+          "time_embedder.proj_in",
+          "time_embedder.proj_out",
+          "video_patch_proj",
+          "audio_patch_proj",
+          "condition_proj",
+          "final_layer.video_out",
+          "final_layer.audio_out",
+          "adaln_proj.linear"
+        ]
+      },
+      "recognized": true,
+      "note": "hashed in 0.0s",
+      "size_h": "9.8 GiB"
+    },
+    "text_encoder": {
+      "key": "text_encoder",
+      "name": "minimax-h3-text-encoder-nf4.safetensors",
+      "path": "/home/yhc/source/minimax-h3/models/minimax-h3-text-encoder-nf4.safetensors",
+      "expect_registered": true,
+      "size_bytes": 15324775807,
+      "tensor_count": 2652,
+      "dtype_bytes": {
+        "F32": 6332800,
+        "BF16": 2747407840,
+        "U8": 12570684431
+      },
+      "top_level_bytes": {
+        "model": 2746358240,
+        "text.layers.10": 251561340,
+        "text.layers.8": 251561340,
+        "text.layers.16": 251561339,
+        "text.layers.3": 251561339,
+        "text.layers.30": 251561339,
+        "text.layers.40": 251561339,
+        "text.layers.6": 251561339,
+        "text.layers.18": 251561338,
+        "text.layers.23": 251561338
+      },
+      "hash": "297933c3a2b0fc4d4dfee30e34c566b8",
+      "matched_model_name": "minimax_h3_text_encoder",
+      "matched_model_class": "diffsynth.models.minimax_h3_text_encoder.MiniMaxH3TextEncoder",
+      "matched_quant": {
+        "method": "bitsandbytes_nf4",
+        "load_prequantized": true,
+        "exclude_modules": [
+          "qkv",
+          "proj",
+          "linear_fc1",
+          "linear_fc2"
+        ]
+      },
+      "recognized": true,
+      "note": "hashed in 0.0s",
+      "size_h": "14.3 GiB"
+    },
+    "video_vae": {
+      "key": "video_vae",
+      "name": "video_vae_nf4.safetensors",
+      "path": "/home/yhc/source/minimax-h3/models/video_vae_nf4.safetensors",
+      "expect_registered": true,
+      "size_bytes": 1613201536,
+      "tensor_count": 1285,
+      "dtype_bytes": {
+        "F32": 749120,
+        "BF16": 363320944,
+        "U8": 1248977360
+      },
+      "top_level_bytes": {
+        "decoder": 1252370448,
+        "encoder": 360671072,
+        "quant_conv": 4704,
+        "post_quant_conv": 1200
+      },
+      "hash": "204819338f4fa12936684eeda37fdf71",
+      "matched_model_name": "minimax_h3_video_vae",
+      "matched_model_class": "diffsynth.models.minimax_h3_video_vae.MiniMaxH3VideoVAE",
+      "matched_quant": {
+        "method": "bitsandbytes_nf4",
+        "load_prequantized": true,
+        "exclude_modules": [
+          "decoder.x_embedder"
+        ]
+      },
+      "recognized": true,
+      "note": "hashed in 0.0s",
+      "size_h": "1.5 GiB"
+    },
+    "audio_vae": {
+      "key": "audio_vae",
+      "name": "audio_vae_nf4.safetensors",
+      "path": "/home/yhc/source/minimax-h3/models/audio_vae_nf4.safetensors",
+      "expect_registered": true,
+      "size_bytes": 284004112,
+      "tensor_count": 1117,
+      "dtype_bytes": {
+        "F32": 9632,
+        "BF16": 277341938,
+        "U8": 6526558
+      },
+      "top_level_bytes": {
+        "encoder": 147429632,
+        "decoder": 129743538,
+        "pre_block": 6565566,
+        "dec_in_proj": 135168,
+        "logs_proj": 2112,
+        "mean_proj": 2112
+      },
+      "hash": "925ae768f8f4a9daa902b789de2ad2dc",
+      "matched_model_name": "minimax_h3_audio_vae",
+      "matched_model_class": "diffsynth.models.minimax_h3_audio_vae.MiniMaxH3AudioVAE",
+      "matched_quant": {
+        "method": "bitsandbytes_nf4",
+        "load_prequantized": true
+      },
+      "recognized": true,
+      "note": "hashed in 0.0s",
+      "size_h": "270.8 MiB"
+    },
+    "lora": {
+      "key": "lora",
+      "name": "AfterMidnight_ref2va_h3_softer_rank64_v1.safetensors",
+      "path": "/home/yhc/source/minimax-h3/models/AfterMidnight_ref2va_h3_softer_rank64_v1.safetensors",
+      "expect_registered": false,
+      "size_bytes": 1192828168,
+      "tensor_count": 600,
+      "dtype_bytes": {
+        "F32": 1192756000
+      },
+      "top_level_bytes": {
+        "lora_unet_blocks": 1192756000
+      },
+      "hash": "715d50d6cc8f47957bc0037fffefd03d",
+      "matched_model_name": null,
+      "matched_model_class": null,
+      "matched_quant": null,
+      "recognized": false,
+      "note": "hashed in 0.0s",
+      "size_h": "1.1 GiB"
+    }
+  },
+  "warnings": [],
+  "errors": [],
+  "sizes_gib": {
+    "dit": 9.764,
+    "text_encoder": 14.272,
+    "vaes": 1.767,
+    "lora_bf16": 0.555
+  },
+  "ceilings": {
+    "tflops_nf4": 44.5,
+    "attn_tflops": 47.2,
+    "stream_gibs": 5.6,
+    "stream_gbs": 6.01,
+    "dit_params_linear": 20038287360.0
+  },
+  "presets": {
+    "draft": {
+      "requested": {
+        "height": 384,
+        "width": 640,
+        "num_frames": 73,
+        "steps": 20
+      },
+      "aligned": {
+        "height": 384,
+        "width": 640,
+        "num_frames": 73,
+        "seconds": 3.04,
+        "latent_t": 22,
+        "latent_h": 24,
+        "latent_w": 40,
+        "audio_latent_t": 122
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 576,
+        "ref_video": 0,
+        "ref_audio": 0,
+        "target_audio": 244,
+        "target_video": 5280,
+        "used": 7200,
+        "seq_len": 7232
+      },
+      "ref_image_latents": [
+        [
+          1024,
+          1024,
+          48,
+          48
+        ]
+      ],
+      "ref_video_latents": [],
+      "linear_tflop_per_step": 289.8,
+      "linear_s_per_step": 6.51,
+      "attn_s_per_step": 1.59,
+      "attn_share": 0.196,
+      "step_s": 8.1,
+      "steps": 20,
+      "denoise_s": 162.0,
+      "denoise_min": 2.7,
+      "wallclock_per_output_second": 53.3,
+      "note": "draft",
+      "refs": [
+        [
+          "image",
+          1024,
+          1024
+        ]
+      ],
+      "ref_image_short_edge": 768,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048
+    },
+    "preview": {
+      "requested": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 73,
+        "steps": 30
+      },
+      "aligned": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 73,
+        "seconds": 3.04,
+        "latent_t": 22,
+        "latent_h": 30,
+        "latent_w": 52,
+        "audio_latent_t": 122
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 1024,
+        "ref_video": 0,
+        "ref_audio": 0,
+        "target_audio": 244,
+        "target_video": 8580,
+        "used": 10948,
+        "seq_len": 11008
+      },
+      "ref_image_latents": [
+        [
+          1024,
+          1024,
+          64,
+          64
+        ]
+      ],
+      "ref_video_latents": [],
+      "linear_tflop_per_step": 441.2,
+      "linear_s_per_step": 9.91,
+      "attn_s_per_step": 3.68,
+      "attn_share": 0.271,
+      "step_s": 13.59,
+      "steps": 30,
+      "denoise_s": 407.8,
+      "denoise_min": 6.8,
+      "wallclock_per_output_second": 134.1,
+      "note": "preview",
+      "refs": [
+        [
+          "image",
+          1024,
+          1024
+        ]
+      ],
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048
+    },
+    "standard": {
+      "requested": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 124,
+        "steps": 30
+      },
+      "aligned": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 124,
+        "seconds": 5.17,
+        "latent_t": 37,
+        "latent_h": 30,
+        "latent_w": 52,
+        "audio_latent_t": 207
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 1024,
+        "ref_video": 0,
+        "ref_audio": 0,
+        "target_audio": 414,
+        "target_video": 14430,
+        "used": 16968,
+        "seq_len": 17024
+      },
+      "ref_image_latents": [
+        [
+          1024,
+          1024,
+          64,
+          64
+        ]
+      ],
+      "ref_video_latents": [],
+      "linear_tflop_per_step": 682.3,
+      "linear_s_per_step": 15.33,
+      "attn_s_per_step": 8.8,
+      "attn_share": 0.365,
+      "step_s": 24.13,
+      "steps": 30,
+      "denoise_s": 723.9,
+      "denoise_min": 12.1,
+      "wallclock_per_output_second": 140.1,
+      "note": "standard",
+      "refs": [
+        [
+          "image",
+          1024,
+          1024
+        ]
+      ],
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 512,
+      "ref_video_max_pixels": 344064
+    },
+    "quality": {
+      "requested": {
+        "height": 576,
+        "width": 1024,
+        "num_frames": 124,
+        "steps": 40
+      },
+      "aligned": {
+        "height": 576,
+        "width": 1024,
+        "num_frames": 124,
+        "seconds": 5.17,
+        "latent_t": 37,
+        "latent_h": 36,
+        "latent_w": 64,
+        "audio_latent_t": 207
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 1024,
+        "ref_video": 0,
+        "ref_audio": 0,
+        "target_audio": 414,
+        "target_video": 21312,
+        "used": 23850,
+        "seq_len": 23872
+      },
+      "ref_image_latents": [
+        [
+          1024,
+          1024,
+          64,
+          64
+        ]
+      ],
+      "ref_video_latents": [],
+      "linear_tflop_per_step": 956.7,
+      "linear_s_per_step": 21.5,
+      "attn_s_per_step": 17.3,
+      "attn_share": 0.446,
+      "step_s": 38.8,
+      "steps": 40,
+      "denoise_s": 1551.9,
+      "denoise_min": 25.9,
+      "wallclock_per_output_second": 300.4,
+      "note": "quality",
+      "refs": [
+        [
+          "image",
+          1024,
+          1024
+        ]
+      ],
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 512,
+      "ref_video_max_pixels": 344064
+    },
+    "text-only": {
+      "requested": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 124,
+        "steps": 30
+      },
+      "aligned": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 124,
+        "seconds": 5.17,
+        "latent_t": 37,
+        "latent_h": 30,
+        "latent_w": 52,
+        "audio_latent_t": 207
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 0,
+        "ref_video": 0,
+        "ref_audio": 0,
+        "target_audio": 414,
+        "target_video": 14430,
+        "used": 15944,
+        "seq_len": 16000
+      },
+      "ref_image_latents": [],
+      "ref_video_latents": [],
+      "linear_tflop_per_step": 641.2,
+      "linear_s_per_step": 14.41,
+      "attn_s_per_step": 7.77,
+      "attn_share": 0.35,
+      "step_s": 22.18,
+      "steps": 30,
+      "denoise_s": 665.4,
+      "denoise_min": 11.1,
+      "wallclock_per_output_second": 128.8,
+      "note": "text-only",
+      "refs": [],
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048
+    },
+    "video-edit": {
+      "requested": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 124,
+        "steps": 30
+      },
+      "aligned": {
+        "height": 480,
+        "width": 832,
+        "num_frames": 124,
+        "seconds": 5.17,
+        "latent_t": 37,
+        "latent_h": 30,
+        "latent_w": 52,
+        "audio_latent_t": 207
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 0,
+        "ref_video": 9324,
+        "ref_audio": 414,
+        "target_audio": 414,
+        "target_video": 14430,
+        "used": 25682,
+        "seq_len": 25728
+      },
+      "ref_image_latents": [],
+      "ref_video_latents": [
+        [
+          832,
+          480,
+          37,
+          24,
+          42
+        ]
+      ],
+      "linear_tflop_per_step": 1031.1,
+      "linear_s_per_step": 23.17,
+      "attn_s_per_step": 20.09,
+      "attn_share": 0.464,
+      "step_s": 43.26,
+      "steps": 30,
+      "denoise_s": 1297.9,
+      "denoise_min": 21.6,
+      "wallclock_per_output_second": 251.2,
+      "note": "video-edit",
+      "refs": [
+        [
+          "video_audio",
+          832,
+          480,
+          124
+        ]
+      ],
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048
+    },
+    "max-native": {
+      "requested": {
+        "height": 768,
+        "width": 1344,
+        "num_frames": 124,
+        "steps": 50
+      },
+      "aligned": {
+        "height": 768,
+        "width": 1344,
+        "num_frames": 124,
+        "seconds": 5.17,
+        "latent_t": 37,
+        "latent_h": 48,
+        "latent_w": 84,
+        "audio_latent_t": 207
+      },
+      "rows": {
+        "text": 1100,
+        "ref_image": 1024,
+        "ref_video": 0,
+        "ref_audio": 0,
+        "target_audio": 414,
+        "target_video": 37296,
+        "used": 39834,
+        "seq_len": 39872
+      },
+      "ref_image_latents": [
+        [
+          1024,
+          1024,
+          64,
+          64
+        ]
+      ],
+      "ref_video_latents": [],
+      "linear_tflop_per_step": 1597.9,
+      "linear_s_per_step": 35.91,
+      "attn_s_per_step": 48.26,
+      "attn_share": 0.573,
+      "step_s": 84.17,
+      "steps": 50,
+      "denoise_s": 4208.5,
+      "denoise_min": 70.1,
+      "wallclock_per_output_second": 814.5,
+      "note": "max-native",
+      "refs": [
+        [
+          "image",
+          1024,
+          1024
+        ]
+      ],
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 512,
+      "ref_video_max_pixels": 344064
+    }
+  },
+  "memory": {
+    "vram_limit_gib": 4.58,
+    "dit_resident_gib": 3.48,
+    "dit_streamed_per_step_gib": 6.28,
+    "stream_cost_s_per_step": 1.12
+  },
+  "resolved": {
+    "vram_limit_gib": 4.58,
+    "attention": {
+      "implementation": "torch",
+      "force_sdpa_backend": "cudnn",
+      "reason": "cuDNN SDPA measured fastest (47.2 TFLOP/s); flash_attn / sageattention / xformers are not installed"
+    },
+    "guidance": {
+      "cfg_scale": 1.0,
+      "reason": "cfg_scale=1.0 skips the negative pass entirely -> halves per-step cost. Use the text-side levers instead of CFG."
+    },
+    "denoise": {
+      "steps": 30,
+      "flow_shift": 12.0,
+      "audio_flow_shift": 3.0
+    },
+    "sampler": {
+      "name": "euler",
+      "note": "FlowMatchScheduler.step() is already a first-order Euler update (prev = sample + model_output * (sigma_next - sigma)); nothing to change"
+    },
+    "scheduler": {
+      "default": "auto",
+      "auto_rule": "beta when a LoRA is attached, flow otherwise",
+      "beta": {
+        "alpha": 0.6,
+        "beta": 0.6,
+        "source": "comfy/samplers.py beta_scheduler, indexed into ModelSamplingDiscreteFlow.sigmas"
+      },
+      "why": "the AfterMidnight Ref2VA LoRA requires 'euler sampler + beta scheduler' or the audio degrades. At 30 steps / shift 12 the final grid sigma is 0.2927 with flow vs 0.0780 with beta, i.e. beta spends far more of the trajectory at low sigma where audio detail is resolved.",
+      "module": "scripts/h3_scheduler.py"
+    },
+    "vae": {
+      "tiled": true,
+      "tile_size": 256,
+      "tile_overlap": 64
+    },
+    "env": {
+      "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+      "OMP_NUM_THREADS": "8",
+      "DIFFSYNTH_ATTENTION_IMPLEMENTATION": "torch"
+    },
+    "default_preset": "standard",
+    "vram_config": {
+      "dit": {
+        "offload_dtype": "disk",
+        "offload_device": "disk",
+        "onload_dtype": "bfloat16",
+        "onload_device": "cpu",
+        "preparing_dtype": "bfloat16",
+        "preparing_device": "cuda",
+        "computation_dtype": "bfloat16",
+        "computation_device": "cuda"
+      },
+      "text_encoder": {
+        "offload_dtype": "disk",
+        "offload_device": "disk",
+        "onload_dtype": "disk",
+        "onload_device": "disk",
+        "preparing_dtype": "bfloat16",
+        "preparing_device": "cuda",
+        "computation_dtype": "bfloat16",
+        "computation_device": "cuda"
+      },
+      "video_vae": {
+        "offload_dtype": "disk",
+        "offload_device": "disk",
+        "onload_dtype": "bfloat16",
+        "onload_device": "cpu",
+        "preparing_dtype": "bfloat16",
+        "preparing_device": "cuda",
+        "computation_dtype": "bfloat16",
+        "computation_device": "cuda"
+      },
+      "audio_vae": {
+        "offload_dtype": "disk",
+        "offload_device": "disk",
+        "onload_dtype": "bfloat16",
+        "onload_device": "cpu",
+        "preparing_dtype": "bfloat16",
+        "preparing_device": "cuda",
+        "computation_dtype": "bfloat16",
+        "computation_device": "cuda"
+      }
+    }
+  }
+}

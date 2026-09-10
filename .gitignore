@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Text-embedding cache -- content-addressed, regenerate in ~12 s, 25 MB each
+cache/text_embed/
+
+# Run logs (keep the tree readable; the README/NOTES carry the conclusions)
+workspace/*/run*.log
+
+# Generated media.  These are deliverables, not source: 4 MB each and
+# regenerable from the committed prompt + reference image, so they stay out
+# of history rather than bloating every future clone.
+workspace/*/outputs/*.mp4
+
+# WSL/Windows interop droppings (the models directory gets these on copy)
+*:Zone.Identifier
+
+# Local scratch
+*.tmp
+.DS_Store

@@ -1,0 +1,156 @@
+{
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+    "capability": "12.0",
+    "sm_count": 36,
+    "vram_total_gb": 7.933,
+    "vram_free_gb": 6.835,
+    "vram_reserved_after_init_gb": 1.098,
+    "torch": "2.14.0+cu132",
+    "cuda": "13.2",
+    "arch_list": [
+      "sm_75",
+      "sm_80",
+      "sm_86",
+      "sm_90",
+      "sm_100",
+      "sm_120"
+    ],
+    "cudnn": 92400
+  },
+  "host_mem": {
+    "MemTotal_gb": 22.91,
+    "MemAvailable_gb": 21.57,
+    "SwapTotal_gb": 8.0,
+    "Cached_gb": 2.55
+  },
+  "cpu_threads": 24,
+  "attention_implementation": "torch",
+  "gemm": [
+    {
+      "shape": "attn.qkv_proj  5376->21504",
+      "tokens": 16000,
+      "ms": 79.05,
+      "tflops": 46.8
+    },
+    {
+      "shape": "attn.out_proj  5376->5376 ",
+      "tokens": 16000,
+      "ms": 19.69,
+      "tflops": 47.0
+    },
+    {
+      "shape": "mlp.fc1        5376->14336",
+      "tokens": 16000,
+      "ms": 52.35,
+      "tflops": 47.1
+    },
+    {
+      "shape": "mlp.fc2       14336->5376 ",
+      "tokens": 16000,
+      "ms": 52.37,
+      "tflops": 47.1
+    },
+    {
+      "shape": "refiner qkv    5376->21504",
+      "tokens": 1500,
+      "ms": 7.96,
+      "tflops": 43.6
+    }
+  ],
+  "dit_step_estimate": {
+    "params_billion_pruned": 14.93,
+    "flops_per_step_tflop": 477.8,
+    "tokens": 16000
+  },
+  "sdpa": {
+    "FLASH_ATTENTION": {
+      "ms": 161.45,
+      "ok": true
+    },
+    "EFFICIENT_ATTENTION": {
+      "ms": 372.51,
+      "ok": true
+    },
+    "CUDNN_ATTENTION": {
+      "ms": 154.63,
+      "ok": true
+    },
+    "MATH": {
+      "ok": false,
+      "error": "RuntimeError: CUDA driver error: device not ready\nThe CUDA driver logged these messages, which may provide useful details:\nFailed to c"
+    }
+  },
+  "pcie": {
+    "h2d_pageable_gbs": 3.6,
+    "d2h_pageable_gbs": 11.47,
+    "h2d_pinned_gbs": 28.21,
+    "h2d_pinned_blocking_gbs": 28.16
+  },
+  "nf4": [
+    {
+      "shape": "qkv   5376->21504",
+      "ms": 84.04,
+      "tflops": 44.0,
+      "packed_mb": 55.1
+    },
+    {
+      "shape": "out   5376->5376 ",
+      "ms": 20.8,
+      "tflops": 44.5,
+      "packed_mb": 13.8
+    },
+    {
+      "shape": "fc1   5376->14336",
+      "ms": 56.17,
+      "tflops": 43.9,
+      "packed_mb": 36.8
+    }
+  ],
+  "bitsandbytes": "0.50.2",
+  "disk": {
+    "cold_read_gbs": 2.89,
+    "file_gb": 9.76
+  },
+  "sdpa_real_layout": {
+    "7744": {
+      "FLASH_ATTENTION": 38.13,
+      "EFFICIENT_ATTENTION": 89.48,
+      "CUDNN_ATTENTION": 36.41,
+      "contig_FLASH_ATTENTION": 40.15
+    },
+    "17856": {
+      "FLASH_ATTENTION": 200.42,
+      "EFFICIENT_ATTENTION": 466.72,
+      "CUDNN_ATTENTION": 194.3,
+      "contig_FLASH_ATTENTION": 206.93
+    }
+  },
+  "stream_cost": [
+    {
+      "layer": "qkv   5376->21504",
+      "packed_mb": 55.1,
+      "ms": 10.43,
+      "gbs": 5.54
+    },
+    {
+      "layer": "out   5376->5376 ",
+      "packed_mb": 13.8,
+      "ms": 1.77,
+      "gbs": 8.17
+    },
+    {
+      "layer": "fc1   5376->14336",
+      "packed_mb": 36.8,
+      "ms": 6.46,
+      "gbs": 5.97
+    },
+    {
+      "layer": "fc2  14336->5376 ",
+      "packed_mb": 36.8,
+      "ms": 6.21,
+      "gbs": 6.2
+    }
+  ],
+  "stream_cost_full_block_ms": 24.9
+}
