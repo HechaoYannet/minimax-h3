@@ -74,7 +74,6 @@ docker/build.ps1                  Windows 侧：准备上下文 + docker build
 docker/run.ps1                    Windows 侧：docker run（GPU + 权重 + 工作区）
 docker/pack-usb.ps1               Windows 侧：docker save + 切片 + 校验和 + 源码快照 → U 盘
 docker/join-and-load.ps1          目标机器：校验分片 → 合并 → docker load
-docker/split-for-usb.sh           切片实现（pack-usb.ps1 调用，也可单独用）
 docker/usb-readme.txt             拷进 U 盘的说明（中文，带 BOM）
 docker/requirements.lock          conda 环境 `pip freeze` 的 109 行清单（备用重建路线，见 §9）
 docker/requirements.optional.txt  可选依赖（deepspeed / cuda-toolkit），默认不装
@@ -201,6 +200,9 @@ pwsh -File .\join-and-load.ps1 -WorkDir D:\h3       # 指定合并的工作目�
 要点：
 
 - **FAT32 单文件 4 GiB 上限**是切片的原因，不是镜像坏了；合并出来还是同一个 tar。
+- 切片**在 PowerShell 里做**，不走 WSL：WSL 只在启动时自动挂载盘符，启动之后插上的 U 盘
+  在 `/mnt/e` 是不存在的（`mkdir: cannot create directory '/mnt/e': Permission denied`），
+  走 WSL 就得先 sudo mount。校验和边写边算，不再回读一遍 U 盘。
 - 合并需要 **≈ 镜像大小 × 2** 的空闲空间（分片 + 合并结果同时存在）。
 - 权重搬不过去：U 盘上**放不下任何一个 >4 GB 的文件**。要连权重一起带走，得把 U 盘格成
   exFAT/NTFS，或改用移动硬盘。U 盘上的 `README.txt` 也写了这一条。
@@ -220,6 +222,7 @@ pwsh -File .\join-and-load.ps1 -WorkDir D:\h3       # 指定合并的工作目�
 | 分片校验失败 | U 盘拷贝坏块 | 重新拷那一个分片；`-SkipVerify` 只用于救急 |
 | `check` 之后 `git status` 多了 `cache/plan.json` | `h3_audit` 重写了**描述性**的 `path` 字段（容器路径 vs WSL 路径） | 无害：`h3_generate.py` 与 `h3_validate.py` 都不读它，模型路径一律由 `H3_MODELS` 现算。`git checkout -- cache/plan.json` 还原 |
 | `docker run <tag> bash -c "..."` 没执行 | 早期版本的 entrypoint 对裸 `bash` 直接 `exec bash`，吃掉了后面的参数 | 已修：除 run_h3.sh 动词外的参数一律 `exec "$@"` |
+| `git push` → `Recv failure: Connection was reset` | 这台机器的 GitHub 走 **Steam++(Watt Toolkit) 加速器**：hosts 把 `github.com` 指到 `127.0.0.1:443`，加速器用的是本地自签证书 —— `gh` 走 Windows 证书库所以正常，`git` 默认的 OpenSSL 后端不认 | 本仓库已设 `git config http.sslBackend schannel`（只对这个仓库生效）。重装/换机会丢，丢了就重设一次 |
 
 不需要权重就能跑的冒烟测试（`docker/smoke.py` 随仓库挂进 `/workspace`）：
 

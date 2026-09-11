@@ -3,10 +3,15 @@
   Export the image and put it on a USB stick, split into FAT32-sized pieces.
 
 .DESCRIPTION
-  docker save produces one enormous tar (well over 4 GiB) and FAT32 refuses any
-  single file that big, so the tar is cut into numbered pieces by
-  docker/split-for-usb.sh and reassembled on the far machine by join-and-load.ps1.
-  A SHA256SUMS file rides along, plus a source snapshot and a README.
+  docker save produces one big tar (this image: 3.6 GB) and FAT32 refuses any
+  single file over 4 GiB, so the tar is cut into numbered pieces here and
+  reassembled on the far machine by join-and-load.ps1.  SHA256SUMS is computed
+  while writing -- no second pass over the stick -- plus a source snapshot and a
+  README.
+
+  The split happens in PowerShell rather than in WSL on purpose: a USB stick
+  plugged in after WSL started is not mounted at /mnt/<letter>, so the WSL route
+  needs a sudo mount first, and this has to work from a plain Windows session.
 
 .EXAMPLE
   pwsh docker/pack-usb.ps1
@@ -19,8 +24,6 @@ param(
     [string]$Folder = 'minimax-h3',
     [int]$PartMiB = 3500,
     [string]$WorkDir,
-    [string]$Distro = 'Ubuntu',
-    [string]$WslUser = 'yhc',
     [switch]$KeepTar,
     [switch]$SkipSource
 )
@@ -29,12 +32,13 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 if (-not $WorkDir) { $WorkDir = Join-Path $PSScriptRoot 'out' }
 
-function ConvertTo-WslPath {
-    param([string]$WindowsPath)
-    $full = (Resolve-Path -LiteralPath $WindowsPath).Path
-    $drive = $full.Substring(0, 1).ToLower()
-    $rest = $full.Substring(2).Replace('\', '/')
-    return "/mnt/$drive$rest"
+function Complete-Part {
+    param($Stream, $Hasher, $List, $Name)
+    $null = $Hasher.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+    $hex = ([BitConverter]::ToString($Hasher.Hash) -replace '-', '').ToLower()
+    $List.Add([pscustomobject]@{ Name = $Name; Hash = $hex })
+    $Stream.Dispose()
+    $Hasher.Dispose()
 }
 
 # --- 1. the stick -------------------------------------------------------------
@@ -54,10 +58,12 @@ if ($vol) {
 $dest = Join-Path $UsbRoot $Folder
 $imageDir = Join-Path $dest 'image'
 New-Item -ItemType Directory -Force -Path $imageDir | Out-Null
+Get-ChildItem -Path $imageDir -Filter 'image.tar.part-*' -ErrorAction SilentlyContinue | Remove-Item -Force
 
 # --- 2. docker save -----------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 $tar = Join-Path $WorkDir 'h3-image.tar'
+if (Test-Path -LiteralPath $tar) { Remove-Item -LiteralPath $tar -Force }
 Write-Host "== docker save ==" -ForegroundColor Cyan
 Write-Host "  $Tag -> $tar"
 docker save -o $tar $Tag
@@ -69,13 +75,40 @@ if ($vol -and ($vol.SizeRemaining / 1GB) -lt ($tarGB + 1)) {
     throw "not enough room on $($letter): need about $tarGB GB, $freeGB GB free"
 }
 
-# --- 3. split onto the stick --------------------------------------------------
+# --- 3. split onto the stick, hashing as we go --------------------------------
 Write-Host "== split ==" -ForegroundColor Cyan
-$wslSplit = (ConvertTo-WslPath (Join-Path $PSScriptRoot 'split-for-usb.sh'))
-$wslTar = ConvertTo-WslPath $tar
-$wslDest = ConvertTo-WslPath $imageDir
-wsl.exe -d $Distro -u $WslUser -- bash $wslSplit $wslTar $wslDest "$($PartMiB)M"
-if ($LASTEXITCODE -ne 0) { throw "split failed" }
+$partBytes = [int64]$PartMiB * 1MB
+$buffer = New-Object byte[] (8MB)
+$input = [System.IO.File]::OpenRead($tar)
+$out = $null
+$crypto = $null
+$written = 0
+$index = 0
+$parts = New-Object System.Collections.Generic.List[object]
+try {
+    while (($read = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        if ($null -eq $out -or $written -ge $partBytes) {
+            if ($null -ne $out) { Complete-Part $out $crypto $parts (Split-Path -Leaf $out.Name) }
+            $partName = 'image.tar.part-{0:D2}' -f $index
+            $index++
+            Write-Host "  $partName"
+            $out = [System.IO.File]::Create((Join-Path $imageDir $partName))
+            $crypto = [System.Security.Cryptography.SHA256]::Create()
+            $written = 0
+        }
+        $out.Write($buffer, 0, $read)
+        $null = $crypto.TransformBlock($buffer, 0, $read, $null, 0)
+        $written += $read
+    }
+    if ($null -ne $out) { Complete-Part $out $crypto $parts (Split-Path -Leaf $out.Name) }
+} finally {
+    if ($null -ne $out) { $out.Dispose() }
+    $input.Dispose()
+}
+
+$sumFile = Join-Path $imageDir 'SHA256SUMS'
+($parts | ForEach-Object { "$($_.Hash)  $($_.Name)" }) | Set-Content -LiteralPath $sumFile -Encoding ASCII
+Write-Host "  $($parts.Count) parts + SHA256SUMS"
 
 # --- 4. the pieces that make it usable on the far side ------------------------
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'join-and-load.ps1') -Destination (Join-Path $dest 'join-and-load.ps1') -Force
@@ -84,7 +117,6 @@ $readme = Join-Path $dest 'README.txt'
 $utf8Bom = New-Object System.Text.UTF8Encoding $true
 [System.IO.File]::WriteAllText($readme, (Get-Content -LiteralPath $readmeSrc -Raw -Encoding UTF8), $utf8Bom)
 
-$parts = @(Get-ChildItem -Path $imageDir -Filter 'image.tar.part-*')
 $stamp = @(
     '',
     '本次导出 / this export',
