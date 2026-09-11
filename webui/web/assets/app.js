@@ -88,6 +88,7 @@ async function boot() {
     initValues();
     buildPresets();
     buildRefButtons();
+    renderPanelDocs();
     bindEvents();
     startTelemetry();
     startLogStream();
@@ -205,6 +206,138 @@ function refreshShapeControls() {
 /* ------------------------------------------------------------------ 参数表单 */
 const SKIP_IN_GRID = { preset: 1, width: 1, height: 1, num_frames: 1, seconds: 1, seed: 1 };
 
+/* 参数文档渲染：数值常量、范围、提示一览、风险与取值语义表。
+   说明文本全部来自 config/params.spec.json（源头是 webui/tools/param_docs.py），
+   前端只负责排版，不在这里重复写任何文案。 */
+const UNIT_ZH = {
+  px: '像素', '帧': '帧', '秒': '秒', '步': '步', GiB: 'GiB', MiB: 'MiB', seed: 'seed',
+  a: 'alpha 倍率', alpha: 'alpha', None: '',
+};
+function fmtUnit(u) { return u ? (UNIT_ZH[u] !== undefined ? UNIT_ZH[u] : u) : ''; }
+
+function constantLine(p) {
+  const bits = [];
+  const d = p.default;
+  if (d && typeof d === 'object' && d.__preset__) {
+    bits.push('默认：跟随预设（' + d.__preset__ + '）');
+  } else if (d !== undefined && d !== null && d !== '') {
+    bits.push('默认：' + (p.type === 'bool' ? (d ? '开' : '关') : d) + (p.unit ? ' ' + p.unit : ''));
+  }
+  if (p.min !== undefined && p.min !== null) bits.push('范围：' + p.min + ' ~ ' + p.max + (p.step ? '（步长 ' + p.step + '）' : ''));
+  if ((p.choices || []).length) bits.push('可选：' + p.choices.join(' / '));
+  if ((p.cli || []).length) bits.push('命令行：' + p.cli.join(' '));
+  return bits.join('　·　');
+}
+
+/* 把 **加粗** 与 \u0060行内代码\u0060 渲染成 HTML（其余一律转义，避免把文档当 HTML 注入） */
+function richText(s) {
+  let h = esc(s);
+  h = h.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  const re = new RegExp("`" + '([^' + "`" + ']+)' + "`", 'g');
+  return h.replace(re, '<code>$1</code>');
+}
+
+function paramDocPanel(p) {
+  const box = el('div', 'pdoc');
+  const id = 'pdoc-' + p.id;
+
+  const toggle = el('button', 'doc-toggle');
+  toggle.type = 'button';
+  toggle.innerHTML = '<span class="caret">▸</span> 详细说明';
+  toggle.onclick = () => {
+    const wrap = document.getElementById(id);
+    const open = wrap.style.display !== 'block';
+    wrap.style.display = open ? 'block' : 'none';
+    toggle.querySelector('.caret').textContent = open ? '▾' : '▸';
+  };
+  box.appendChild(toggle);
+
+  const wrap = el('div', 'doc-body');
+  wrap.id = id;
+  wrap.style.display = 'none';
+
+  const constLine = constantLine(p);
+  if (constLine) wrap.appendChild(el('div', 'doc-const', constLine));
+  if (p.detail) {
+    const d = el('div', 'doc-detail');
+    d.innerHTML = richText(p.detail);
+    wrap.appendChild(d);
+  }
+  if ((p.tips || []).length) {
+    wrap.appendChild(el('div', 'doc-sub', '经验与推荐'));
+    const ul = el('ul', 'doc-ul');
+    p.tips.forEach(t => { const li = el('li'); li.innerHTML = richText(t); ul.appendChild(li); });
+    wrap.appendChild(ul);
+  }
+  if ((p.risks || []).length) {
+    wrap.appendChild(el('div', 'doc-sub warn', '风险'));
+    const ul = el('ul', 'doc-ul risks');
+    p.risks.forEach(t => { const li = el('li'); li.innerHTML = richText(t); ul.appendChild(li); });
+    wrap.appendChild(ul);
+  }
+  if ((p.ranges || []).length) {
+    wrap.appendChild(el('div', 'doc-sub', '取值语义'));
+    const tbl = el('table', 'doc-tbl');
+    const tb = document.createElement('tbody');
+    p.ranges.forEach(r => {
+      const tr = document.createElement('tr');
+      tr.appendChild(el('td', 'rng', String(r[0])));
+      const td = el('td'); td.innerHTML = richText(String(r[1]));
+      tr.appendChild(td);
+      tb.appendChild(tr);
+    });
+    tbl.appendChild(tb);
+    wrap.appendChild(tbl);
+  }
+  box.appendChild(wrap);
+  return box;
+}
+
+/* 分组卡片的说明：抬头一句话 + 「本组要点」弹窗 */
+function renderPanelDocs() {
+  const map = { params: 'card-params', perf: 'card-perf', lora: 'card-lora', cache: 'card-lora', vae: 'card-perf' };
+  const docs = (S.spec || {}).panel_docs || {};
+  Object.keys(docs).forEach((key) => {
+    const card = $(map[key] || '');
+    if (!card) return;
+    const head = card.querySelector('.card-head');
+    if (!head || head.querySelector('.panel-doc-btn')) return;
+    const d = docs[key];
+    // 抬头补一句「这一组是干什么的」
+    const titleEl = head.querySelector('.card-title');
+    if (titleEl && d.brief && !titleEl.querySelector('.panel-brief')) {
+      const b = el('span', 'panel-brief', '· ' + d.brief);
+      titleEl.appendChild(b);
+    }
+    if (!(d.tips || []).length) return;
+    const btn = el('button', 'ghost-btn sm panel-doc-btn', '本组要点');
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const body = el('div');
+      const ul = el('ul', 'doc-ul');
+      d.tips.forEach(t => { const li = el('li'); li.innerHTML = richText(t); ul.appendChild(li); });
+      body.appendChild(ul);
+      const link = el('button', 'ghost-btn sm', '打开完整参数手册');
+      link.onclick = () => { $('modal').hidden = true; selectView('about'); };
+      body.appendChild(link);
+      confirmModal(d.title || key, body, '知道了', null);
+    };
+    const actions = head.querySelector('.card-actions');
+    (actions || head).appendChild(btn);
+  });
+}
+
+/* 全局：展开/收起所有参数说明 */
+function setAllDocs(open) {
+  document.querySelectorAll('#card-params .doc-body, #card-perf .doc-body, #card-lora .doc-body')
+    .forEach((w) => { w.style.display = open ? 'block' : 'none'; });
+  document.querySelectorAll('.doc-toggle').forEach((b) => {
+    const caret = b.querySelector('.caret');
+    if (caret) caret.textContent = open ? '▾' : '▸';
+  });
+}
+
+
 function buildParamFields() {
   const grid = $('params-grid'), perf = $('perf-grid'), lora = $('lora-grid');
   grid.innerHTML = ''; perf.innerHTML = ''; lora.innerHTML = '';
@@ -252,11 +385,12 @@ function fieldFor(p) {
   });
   ctl.appendChild(input);
   f.appendChild(ctl);
-  if (p.help) f.appendChild(el('div', 'hint', p.help));
-  const extra = [];
-  if (p.min !== undefined) extra.push('范围 ' + p.min + '~' + p.max);
-  if (p.choices) extra.push('可选 ' + p.choices.join(' / '));
-  if (extra.length) f.appendChild(el('div', 'hint dim', extra.join('；')));
+  if (p.help) {
+    const h = el('div', 'hint');
+    h.innerHTML = richText(p.help);
+    f.appendChild(h);
+  }
+  f.appendChild(paramDocPanel(p));
   return f;
 }
 
@@ -633,7 +767,17 @@ function bindEvents() {
   $('btn-close-prompt').onclick = () => { $('prompt-card').hidden = true; };
   $('btn-advanced').onclick = () => {
     ['card-params', 'card-perf', 'card-lora', 'card-cmd'].forEach(id => $(id).classList.remove('collapsed'));
+    // 一次点开就把每个参数的详细说明也铺开：这是「高级参数」按钮该有的行为
+    setAllDocs(true);
     $('card-params').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  // 「说明」按钮长在可折叠卡片的抬头里，必须阻止冒泡，否则点它会把整张卡片收起来
+  $('btn-doc-all').onclick = (e) => { // eslint-disable-line no-unused-vars
+    e.stopPropagation();
+    const anyClosed = Array.from(document.querySelectorAll('#card-params .doc-body'))
+      .some(w => w.style.display !== 'block');
+    setAllDocs(anyClosed);
+    toast(anyClosed ? '已展开全部参数说明' : '已收起全部参数说明', 'info', 2400);
   };
   document.querySelectorAll('[data-collapse]').forEach(h => h.onclick = () => h.parentElement.classList.toggle('collapsed'));
   document.querySelectorAll('#prompt-tabs .tab').forEach(t => t.onclick = () => {
@@ -1276,14 +1420,78 @@ async function loadAboutDoc() {
     '<div>WSL 主机</div><div>' + esc(h.host) + '</div>' +
     '<div>已运行</div><div>' + fmtDur(h.uptime_s) + '</div></div>' +
     '<h2>检查项</h2><table class="tbl"><tbody>' + rows + '</tbody></table>';
+  renderAboutParams();
+
   const tb = $('spec-table').querySelector('tbody');
   tb.innerHTML = '';
   (S.spec.params || []).forEach((p) => {
     const tr = document.createElement('tr');
-    [p.label || p.id, p.group_title || p.group, p.type,
-     JSON.stringify(p.default === undefined ? null : p.default),
+    const def = (p.default && typeof p.default === 'object' && p.default.__preset__)
+      ? '跟随预设' : JSON.stringify(p.default === undefined ? null : p.default);
+    [p.label || p.id, p.group_title || p.group, p.type, def,
      (p.cli || []).join(' '), p.help || ''].forEach(c => tr.appendChild(el('td', null, c)));
     tb.appendChild(tr);
+  });
+}
+
+/* 「环境自检」页里的完整参数手册：与卡片上的详细说明同源 */
+function renderAboutParams() {
+  const host = $('about-params');
+  if (!host) return;
+  host.innerHTML = '';
+  const spec = S.spec || {};
+  const groups = [];
+  const seen = {};
+  (spec.params || []).forEach((p) => {
+    const g = p.group_title || p.group || '其它';
+    if (!seen[g]) { seen[g] = { title: g, items: [] }; groups.push(seen[g]); }
+    seen[g].items.push(p);
+  });
+  const T = String.fromCharCode(96);
+  groups.forEach((g) => {
+    const h = el('h3', null, g.title);
+    host.appendChild(h);
+    g.items.forEach((p) => {
+      const box = el('div', 'about-param');
+      const head = el('div', 'about-param-head');
+      head.innerHTML = '<b>' + esc(p.label || p.id) + '</b> <code>' +
+        esc((p.cli || []).join(' ') || p.id) + '</code>';
+      box.appendChild(head);
+      const cl = constantLine(p);
+      if (cl) box.appendChild(el('div', 'doc-const', cl));
+      if (p.help) { const d = el('div', 'doc-detail'); d.innerHTML = richText(p.help); box.appendChild(d); }
+      if (p.detail) { const d = el('div', 'doc-detail'); d.innerHTML = richText(p.detail); box.appendChild(d); }
+      if ((p.tips || []).length) {
+        const ul = el('ul', 'doc-ul');
+        p.tips.forEach(t => { const li = el('li'); li.innerHTML = richText(t); ul.appendChild(li); });
+        box.appendChild(ul);
+      }
+      if ((p.risks || []).length) {
+        box.appendChild(el('div', 'doc-sub warn', '风险'));
+        const ul = el('ul', 'doc-ul risks');
+        p.risks.forEach(t => { const li = el('li'); li.innerHTML = richText(t); ul.appendChild(li); });
+        box.appendChild(ul);
+      }
+      if ((p.ranges || []).length) {
+        const tbl = el('table', 'doc-tbl');
+        const tb = document.createElement('tbody');
+        p.ranges.forEach(r => {
+          const tr = document.createElement('tr');
+          tr.appendChild(el('td', 'rng', String(r[0])));
+          const td = el('td'); td.innerHTML = richText(String(r[1]));
+          tr.appendChild(td); tb.appendChild(tr);
+        });
+        tbl.appendChild(tb); box.appendChild(tbl);
+      }
+      host.appendChild(box);
+    });
+  });
+  ((spec.general_notes) || []).forEach((n) => {
+    const h = el('h3', null, n.title);
+    host.appendChild(h);
+    const ul = el('ul', 'doc-ul');
+    (n.lines || []).forEach((ln) => { const li = el('li'); li.innerHTML = richText(ln); ul.appendChild(li); });
+    host.appendChild(ul);
   });
 }
 

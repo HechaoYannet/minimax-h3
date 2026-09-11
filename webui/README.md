@@ -48,7 +48,11 @@ webui/
     index.html  assets/app.css  assets/app.js  assets/guide.md
   tools/
     gen_params.py              从 cache/plan.json + scripts/h3_generate.py 生成参数规格
+    param_docs.py              参数中文文档（一句话/详细/经验/风险/取值语义）—— 文案的唯一来源
     mock_deepseek.py           本地假 DeepSeek 服务，用于离线验证优化链路
+    test_docs_render.js        参数文档渲染的桩测试（node，不需要浏览器）
+
+docs/PARAMETERS.md             由 gen_params.py --write-docs 生成的参数参考手册
 ```
 
 ---
@@ -78,6 +82,20 @@ webui/
    **不设这个变量时它是彻底的 no-op**，终端用法、`--bench`、`--dry-run` 的输出与以前完全一致。
 
 > 验证过：`./run_h3.sh dry --preset draft --prompt x` 的输出与加钩子之前逐字相同。
+
+### 参数文案为什么也只有一个源
+
+每个参数的「一句话 / 详细说明 / 经验 / 风险 / 取值语义」全部写在 `webui/tools/param_docs.py` 一处，
+由 `gen_params.py` 带进 `config/params.spec.json`，三个消费方共用：
+
+| 消费方 | 呈现方式 |
+|---|---|
+| 页面上每个参数卡片 | 一句话常显；「详细说明」折叠区放 detail / 经验 / 风险 / 取值语义表；再加一行常量（默认值·范围·可选值·对应命令行开关） |
+| 页面「环境自检」页签 | 完整参数手册（按分组铺开，含 5 段补充说明）+ 规格表 |
+| `docs/PARAMETERS.md` | 可搜索、可提交的参考文档（`gen_params.py --write-docs` 生成，约 480 行） |
+
+改文案只改 `param_docs.py`，跑一次 `python3 webui/tools/gen_params.py --write-docs`，三处同时更新。
+漏写的参数会被 `params_undocumented` 列出来并打印在生成日志里 —— 以后新增参数不会静默没文档。
 
 ### 为什么用标准库写后端
 
@@ -254,6 +272,9 @@ max-long      832x480x243         31040   31040
 ## 8. 离线自测
 
 ```bash
+# 0) 重新生成参数规格与文档（改了 param_docs.py 或 gen_params.py 之后）
+python3 webui/tools/gen_params.py --write-docs
+
 # 1) 后端自检（不起服务）
 python3 webui/serve.py --check
 

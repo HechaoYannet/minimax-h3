@@ -19,6 +19,9 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from param_docs import GENERAL_NOTES, PANEL_DOCS, PARAM_DOCS, SECTION_ORDER  # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 GEN = os.path.join(REPO, "scripts", "h3_generate.py")
@@ -191,7 +194,8 @@ def build():
     RANGES = {
         "width": [160, 1920, 32],
         "height": [160, 1920, 32],
-        "num_frames": [5, 400, 1],
+        # 框架只要求 %17==5，但实测 5 帧会在 VAE 解码处崩（见 param_docs 的 num_frames）
+    "num_frames": [22, 400, 1],
         "steps": [1, 80, 1],
         "seed": [0, 2**31 - 1, 1],
         "ref_image_short_edge": [256, 2048, 64],
@@ -209,7 +213,10 @@ def build():
     params = []
     for group, gtitle, names in ORDER:
         for name in names:
-            label, unit, help_ = LBL.get(name, (name, None, ""))
+            doc = PARAM_DOCS.get(name) or {}
+            label = doc.get("label") or LBL.get(name, (name, None, ""))[0]
+            unit = doc.get("unit", LBL.get(name, (name, None, ""))[1])
+            help_ = doc.get("brief") or LBL.get(name, (name, None, ""))[2]
             spec = args.get(name)
             item = {
                 "id": name,
@@ -218,6 +225,12 @@ def build():
                 "label": label,
                 "unit": unit,
                 "help": help_,
+                # 详情来自 webui/tools/param_docs.py（单一数据源）：
+                # detail = 它到底控制什么；tips/risks/ranges = 经验、风险、取值语义。
+                "detail": doc.get("detail", ""),
+                "tips": doc.get("tips", []),
+                "risks": doc.get("risks", []),
+                "ranges": doc.get("ranges", []),
                 "type": (spec or {}).get("type", "int" if name in RANGES else "str"),
                 "choices": (spec or {}).get("choices"),
                 "cli": (spec or {}).get("flags", []),
@@ -280,9 +293,15 @@ def build():
         fit = {"a": sol[0], "b": sol[1], "c": sol[2], "n_points": n,
                "seq_range": [min(p[0] for p in pts), max(p[0] for p in pts)]}
 
+    undocumented = [p["id"] for p in params
+                    if not p.get("detail") and p["id"] not in ("preset", "seconds")]
     return {
         "generated_by": "webui/tools/gen_params.py",
-        "source": {"plan": "cache/plan.json", "cli": "scripts/h3_generate.py"},
+        "source": {"plan": "cache/plan.json", "cli": "scripts/h3_generate.py",
+                   "docs": "webui/tools/param_docs.py"},
+        "params_undocumented": undocumented,
+        "panel_docs": PANEL_DOCS,
+        "general_notes": [{"title": t, "lines": ls} for t, ls in GENERAL_NOTES],
         "presets": presets,
         "default_preset": resolved.get("default_preset", "standard"),
         "params": params,
@@ -323,9 +342,134 @@ def build():
     }
 
 
+def render_markdown(data: dict) -> str:
+    """把规格渲染成一份可搜索、可提交的参考文档（docs/PARAMETERS.md）。"""
+    by_id = {p["id"]: p for p in data["params"]}
+    TICK = "\x60"          # 反引号：写成转义，避免本文件被 shell/编辑器工具链二次解析
+    out: list[str] = []
+    A = out.append
+
+    A("# 生成参数参考手册")
+    A("")
+    A("> 本文件由 webui/tools/gen_params.py 从三处自动生成，**不要手改**：")
+    A(">")
+    A("> - 参数取值与预设：cache/plan.json（scripts/h3_audit.py 产出）")
+    A("> - 命令行开关：scripts/h3_generate.py 的 argparse 定义")
+    A("> - 中文说明：webui/tools/param_docs.py")
+    A(">")
+    A("> 重新生成：python3 webui/tools/gen_params.py --write-docs")
+    A("")
+    A("页面上的参数卡片、页内参数手册、以及本文件，全部来自同一份说明文本 —— 改一处，三处同步。")
+    A("")
+
+    if data.get("params_undocumented"):
+        A("> 尚未写详细说明的参数：" + "、".join(data["params_undocumented"]) + "。")
+        A("")
+
+    A("## 目录")
+    A("")
+    for title, names in SECTION_ORDER:
+        if [n for n in names if n in by_id]:
+            A("- [" + title + "](#" + title + ")")
+    A("- [补充说明：形状、序列长度、显存与内存](#补充说明形状序列长度显存与内存)")
+    A("- [预设一览（实测/校准值）](#预设一览实测校准值)")
+    A("")
+
+    for title, names in SECTION_ORDER:
+        ids = [n for n in names if n in by_id]
+        if not ids:
+            continue
+        A("## " + title)
+        A("")
+        for pid in ids:
+            p = by_id[pid]
+            cli = " ".join(p.get("cli") or [])
+            default = p.get("default")
+            if isinstance(default, dict) and "__preset__" in default:
+                default = "跟随预设（" + default["__preset__"] + "）"
+            A("### " + p["label"] + "　" + TICK + (cli or pid) + TICK)
+            A("")
+            meta = []
+            if p.get("unit"):
+                meta.append("单位 " + str(p["unit"]))
+            if p.get("choices"):
+                meta.append("可选 " + " / ".join(p["choices"]))
+            if p.get("min") is not None:
+                meta.append("范围 " + str(p["min"]) + " ~ " + str(p["max"]))
+            if default is not None:
+                meta.append("默认 " + str(default))
+            if meta:
+                A("*" + " · ".join(meta) + "*")
+                A("")
+            if p.get("help"):
+                A("**一句话**：" + p["help"])
+                A("")
+            if p.get("detail"):
+                A(p["detail"])
+                A("")
+            if p.get("tips"):
+                A("**经验与推荐**")
+                A("")
+                for t in p["tips"]:
+                    A("- " + t)
+                A("")
+            if p.get("risks"):
+                A("**风险**")
+                A("")
+                for t in p["risks"]:
+                    A("- " + t)
+                A("")
+            if p.get("ranges"):
+                A("**取值语义**")
+                A("")
+                A("| 取值 | 含义 |")
+                A("|---|---|")
+                for rng, meaning in p["ranges"]:
+                    A("| " + TICK + str(rng) + TICK + " | " + str(meaning) + " |")
+                A("")
+
+    A("## 补充说明：形状、序列长度、显存与内存")
+    A("")
+    for title, lines in GENERAL_NOTES:
+        A("### " + title)
+        A("")
+        for ln in lines:
+            A("- " + ln)
+        A("")
+
+    A("## 预设一览（实测/校准值）")
+    A("")
+    A("| 预设 | 形状 | 步数 | seq | s/步 | 去噪 | 参考图短边 | 参考视频短边 |")
+    A("|---|---|---|---|---|---|---|---|")
+    for name, p in data.get("presets", {}).items():
+        A("| " + TICK + name + TICK + " | " + str(p.get("width")) + "x" + str(p.get("height"))
+          + "x" + str(p.get("num_frames")) + " | " + str(p.get("steps")) + " | "
+          + str(p.get("seq_len")) + " | " + str(p.get("step_s")) + " | "
+          + str(p.get("denoise_min")) + " min | " + str(p.get("ref_image_short_edge")) + " | "
+          + str(p.get("ref_video_short_edge")) + " |")
+    A("")
+    A("已知跑不通的档位（实测）：")
+    A("")
+    for f in data.get("known_failures", []):
+        A("- " + TICK + f["label"] + TICK + "：" + f["reason"])
+    A("")
+
+    A("## 实测数据点（耗时预估的插值依据）")
+    A("")
+    A("| 配置 | seq | s/步 | 总时长 | 峰值显存 |")
+    A("|---|---|---|---|---|")
+    for m in data.get("measured", []):
+        A("| " + m["label"] + " | " + str(m["seq"]) + " | " + str(m["step_s"]) + " | "
+          + str(m["total_s"]) + " s | " + str(m["peak_gib"]) + " GiB |")
+    A("")
+    return "\n".join(out) + "\n"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--print", action="store_true", dest="to_stdout")
+    ap.add_argument("--write-docs", action="store_true", dest="write_docs",
+                    help="同时渲染 docs/PARAMETERS.md")
     a = ap.parse_args()
     data = build()
     text = json.dumps(data, ensure_ascii=False, indent=2)
@@ -335,6 +479,14 @@ def main():
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(text + "\n")
     print(f"wrote {OUT} ({len(data['params'])} params, {len(data['presets'])} presets)")
+    if data.get("params_undocumented"):
+        print("  note: params without detailed docs -> " + ", ".join(data["params_undocumented"]))
+    if a.write_docs:
+        doc = os.path.join(REPO, "docs", "PARAMETERS.md")
+        os.makedirs(os.path.dirname(doc), exist_ok=True)
+        with open(doc, "w", encoding="utf-8") as f:
+            f.write(render_markdown(data))
+        print(f"wrote {doc}")
     return 0
 
 

@@ -166,6 +166,7 @@
           <div class="card-head clickable" data-collapse>
             <div class="card-title">生成参数</div>
             <div class="card-summary" id="params-summary"></div>
+            <button class="ghost-btn sm" id="btn-doc-all" title="展开/收起每个参数的详细说明">说明</button>
             <span class="caret">▾</span>
           </div>
           <div class="card-body grid" id="params-grid"></div>
@@ -233,9 +234,17 @@
       <section class="view" id="view-about" hidden>
         <h1>环境自检</h1>
         <div class="doc" id="about-doc"></div>
-        <h2>参数规格</h2>
+
+        <h2>参数手册</h2>
+        <div class="muted tiny" style="margin-bottom:8px">
+          与页面上参数卡片的「详细说明」同源（config/params.spec.json ← webui/tools/param_docs.py）；
+          命令行可用 <code>python3 webui/tools/gen_params.py --write-docs</code> 导出为 docs/PARAMETERS.md。
+        </div>
+        <div class="doc" id="about-params"></div>
+
+        <h2>参数规格表</h2>
         <div class="table-wrap"><table class="tbl" id="spec-table">
-          <thead><tr><th>参数</th><th>分组</th><th>类型</th><th>默认</th><th>CLI</th><th>说明</th></tr></thead>
+          <thead><tr><th>参数</th><th>分组</th><th>类型</th><th>默认</th><th>CLI</th><th>一句话</th></tr></thead>
           <tbody></tbody>
         </table></div>
       </section>

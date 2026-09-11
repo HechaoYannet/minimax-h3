@@ -249,6 +249,39 @@ label.mini input[type=checkbox]{accent-color:var(--brand)}
 .status-dot.cancelled,.status-dot.interrupted{background:var(--dim)}
 @keyframes pulse{0%{box-shadow:0 0 0 0 #4f7cff88}70%{box-shadow:0 0 0 7px #4f7cff00}100%{box-shadow:0 0 0 0 #4f7cff00}}
 
+
+/* ---------------------------------------------------------------- 参数文档 */
+.panel-brief{font-weight:400;font-size:11.5px;color:var(--dim);margin-left:6px}
+.panel-doc-btn{margin-left:2px}
+.field{min-width:210px}
+.pdoc{margin-top:6px}
+.doc-toggle{
+  background:transparent;border:0;color:var(--brand-2);cursor:pointer;font-size:11.5px;
+  padding:2px 0;display:inline-flex;align-items:center;gap:4px;
+}
+.doc-toggle:hover{color:#fff;text-decoration:underline}
+.doc-toggle .caret{font-size:9px;color:var(--dim)}
+.doc-body{
+  margin-top:6px;padding:9px 10px;border-left:2px solid var(--line-2);
+  background:#101216;border-radius:0 8px 8px 0;font-size:11.5px;line-height:1.65;
+}
+.doc-const{color:var(--dim);font-family:var(--mono);font-size:10.5px;margin-bottom:6px;word-break:break-word}
+.doc-detail{color:#c6cddb}
+.doc-sub{color:var(--muted);font-weight:600;margin:8px 0 3px;font-size:11px}
+.doc-sub.warn{color:var(--warn)}
+.doc-ul{margin:0;padding-left:16px;color:#b9c1d0}
+.doc-ul li{margin:3px 0}
+.doc-ul.risks li{color:#e6b9b9}
+.doc-tbl{width:100%;border-collapse:collapse;margin:5px 0 2px;font-size:11px}
+.doc-tbl td{border-top:1px solid var(--line);padding:3px 6px;color:#b9c1d0}
+.doc-tbl td.rng{color:var(--brand-2);font-family:var(--mono);white-space:nowrap;width:1%}
+.about-param{border-top:1px solid var(--line);padding:10px 0 4px}
+.about-param:first-of-type{border-top:0}
+.about-param-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.about-param-head code{font-size:11px;color:var(--brand-2);background:#0009}
+#about-params h3{margin:18px 0 2px;font-size:13.5px;color:var(--text);border-bottom:1px solid var(--line);padding-bottom:5px}
+#about-params .doc-detail{color:#b9c1d0;margin-top:4px}
+
 /* ---------------------------------------------------------------- 表格/文档 */
 .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px}
 .tbl{width:100%;border-collapse:collapse;font-size:12.5px}
