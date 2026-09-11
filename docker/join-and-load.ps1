@@ -24,14 +24,21 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not $ImageDir) { $ImageDir = $PSScriptRoot }
+if (-not $ImageDir) {
+    # On the stick the pieces live in an "image" subdirectory next to this
+    # script; copied loose into a folder, they sit right beside it.
+    $nested = Join-Path $PSScriptRoot 'image'
+    $ImageDir = if (Test-Path -LiteralPath $nested) { $nested } else { $PSScriptRoot }
+}
 if (-not (Test-Path -LiteralPath $ImageDir)) { throw "no such directory: $ImageDir" }
 
 $server = docker version --format '{{.Server.Version}}' 2>&1
 if ($LASTEXITCODE -ne 0) { throw "docker engine not reachable - start Docker Desktop first ($server)" }
 
 $parts = @(Get-ChildItem -Path $ImageDir -Filter 'image.tar.part-*' | Sort-Object Name)
-if ($parts.Count -eq 0) { throw "no image.tar.part-* files in $ImageDir" }
+if ($parts.Count -eq 0) {
+    throw "no image.tar.part-* files in $ImageDir -- pass -ImageDir <folder holding the pieces>"
+}
 $totalBytes = ($parts | Measure-Object Length -Sum).Sum
 Write-Host "== pieces ==" -ForegroundColor Cyan
 Write-Host "  $($parts.Count) parts, $([math]::Round($totalBytes/1GB,2)) GB"
@@ -86,4 +93,4 @@ docker images --format '  {{.Repository}}:{{.Tag}}  {{.Size}}' | Select-String -
 Write-Host ""
 Write-Host "next: mount the weights and run the checks"
 Write-Host "  docker run --rm -it --gpus all -v <models-dir>:/models $ExpectedTag check"
-Write-Host "the 27 GB of weights are NOT in the image - see README.txt next to the pieces."
+Write-Host "the 27 GB of weights are NOT in the image - see README.txt on the stick."
