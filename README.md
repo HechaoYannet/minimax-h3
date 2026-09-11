@@ -3,6 +3,8 @@
 > 目标机器：RTX 5070 Laptop (8 GiB, sm_120) / 32 GiB 宿主内存（WSL2 分到 **22.91 GiB**）/ 24 线程 / WSL2 (Ubuntu)
 > 权重与框架位置：`~/source/minimax-h3/`（`models/` + `DiffSynth-Studio/`）
 > 本仓库：`D:\otherProject\minimax-h3`（WSL 中为 `/mnt/d/otherProject/minimax-h3`）
+> 容器化：整条环境已封成一个 Docker 镜像，在 **Windows 侧**（Docker Desktop）构建与运行，
+> 可 `docker save` 切片刻盘带走。见 §13 与 [`docker/README.md`](docker/README.md)
 > **端到端已跑通**（`workspace/pink-harem-ref2va/`，见 §10 实测记录）。§1~§7 的性能数字是**未跑推理时**的微基准外推，§10 给出实测对照 —— 有几项差得比较远，以 §10 为准。
 
 ---
@@ -11,7 +13,7 @@
 
 | 项目 | 结论 |
 |---|---|
-| 能否跑 | **能，已实测出片。** 三个环境问题见 §3：torchaudio 已换官方 cu132 版、processor 已就位、**torchcodec 缺 FFmpeg 共享库**（只影响参考视频/音频，已在本工作流内兜底） |
+| 能否跑 | **能，已实测出片。** 三个环境问题见 §3：torchaudio 已换官方 cu132 版、processor 已就位、torchcodec 缺 FFmpeg 共享库 —— **该问题现已消失**（WSL 里补装了 FFmpeg 6.1，容器里是 7.1），工作流里的兜底保留但不再触发 |
 | 推荐起点 | `draft` 预设（640×384×73f，20 步）= **4.7 分钟** 实测出片（预测 2.7 分钟） |
 | 交付档 | `standard` 预设（832×480×124f，30 步）= **24 分钟**（按实测 s/step 外推；预测 12.1 分钟） |
 | 官方默认档 | 768×1344 + 50 步 ≈ **2.5 小时** 外推，本机不建议（序列长 2.3×，注意力是平方项） |
@@ -20,6 +22,7 @@
 | 内存 | WSL 现有 **22.91 GiB**。DiT 常驻 CPU 时 RSS 峰值 **11.08 GiB**（实测），`--dit-onload disk` 降到 **4.75 GiB** |
 | 最大的免费优化 | 参考图的 `ref_image_short_edge`：框架默认 2048 对一张 1024²图要多花 **54% 注意力**，改成 1024 只要 12% |
 | LoRA 要求 | **euler + beta scheduler**。Euler 框架本来就是；beta 已实现（`scripts/h3_scheduler.py`），挂 LoRA 时自动启用 |
+| 可复现 | 环境已封成镜像（Python 3.14.7 / torch 2.14.0+cu132 / DiffSynth `50e5efb`），依赖按 `pip freeze` 逐行锁定。**权重不进镜像**（27 GB 挂载），见 §13 |
 
 ---
 
@@ -141,6 +144,18 @@ OSError: libavutil.so.61: cannot open shared object file: No such file or direct
 - 失败时给的是能看懂的提示（`no decodable audio track found; use --ref-video ...`），而不是 torchcodec 的加载栈。
 
 **想根治**（之后可以撤掉上面的兜底）：装 FFmpeg 共享库，例如 `sudo apt install -y ffmpeg` 或 `conda install -c conda-forge ffmpeg`。装完 `read_audio` / `torchaudio.load` 就都能用，而兜底是 try-first 的，会自动不再触发。
+
+**现状（2026-09-11 复核）：已经根治了，本节描述的症状不复现。**
+
+WSL 里现在有 FFmpeg 6.1 的共享库（`ldconfig -p` 能看到 `libavutil.so.58` / `libavcodec.so.60`），
+实测 `torchaudio.load` 与 `diffsynth.utils.data.audio.read_audio` 都正常返回。`h3_generate.py`
+里的 `decode_audio()` 是 try-first 的，所以它自动不再触发，代码不需要动。
+
+补充一个当时不知道的事实：**torchcodec 0.16 自带六个 core 变体**，分别是
+`libtorchcodec_core4..core9`，对应 `libavutil.so.56/57/58/59/60/61`（即 FFmpeg 4.x~8.x），
+导入时按系统里现成的 FFmpeg 挑一个。所以"必须手编某个特定版本的 FFmpeg"是错的 ——
+发行版自带的那份就够（Debian trixie 的 7.1 → `libavutil.so.59` → `core7`）。
+容器镜像正是按这条结论只装 `apt install ffmpeg` 的。
 
 ---
 
@@ -427,6 +442,9 @@ cache/bench.json                 基准结果
 cache/validate.json              校验结果（含框架真实 seq 表）
 cache/plan.json                  最终方案（h3_generate 的默认值来源）
 workspace/<video-project-name>/  素材、提示词和输出视频存放地；工作目录
+docker/                          容器化封装（§13）；镜像定义、构建/运行/打包脚本、中文说明
+docker/requirements.lock         WSL 环境 pip freeze 的逐行锁定（109 个包）
+docker/vendor/                   构建上下文产物（git 忽略）：DiffSynth 源码 tar + processor
 references/                      提示词准写准则（严格执行）                       
 ```
 
@@ -713,4 +731,94 @@ DiT 常驻 CPU 占 9.5 GiB，冷启动文本编码器再 mmap 14.27 GiB，两者
 
 所以：**长片段/高分辨率一律用 `--dit-onload disk`**，DiT 走 mmap 不落地到 RAM。
 实测同尺寸下它并不慢（832×480×73：21.18 s/step；832×480×124：33.36 s/step）。
+---
+
+## 13. 容器化：把 WSL 侧的环境封成一个镜像
+
+### 13.1 为什么是「Windows 侧构建、Windows 侧运行」
+
+Docker 只装在 Windows 侧（Docker Desktop）。WSL 里那个 `docker` 命令是 Docker Desktop 的
+转发壳，但本发行版没开 WSL 集成，直接跑会得到 `The command 'docker' could not be found in
+this WSL 2 distro`。所以构建与运行都在 Windows 侧，WSL 只做两件事：
+
+- 生成构建上下文（`docker/prepare-context.sh`）；
+- 把权重拷到 Windows 可见路径（`docker/stage-models.sh`）。
+
+仓库本身就在 `D:\` 上（WSL 里是 `/mnt/d/`），**是同一份文件**，不需要任何拷贝 ——
+这也是为什么构建上下文能直接指向仓库根目录。
+
+### 13.2 四个实测约束（这里的每个设计都是被它们逼出来的）
+
+| 约束 | 实测现象 | 处理方式 |
+|---|---|---|
+| **Docker Hub 不可达** | `docker pull alpine:3.20` → `dial tcp 103.42.176.244:443: connectex: No connection could be made` | 基础镜像走 `docker.m.daocloud.io` 镜像站；`BASE_REGISTRY` 是可覆盖的 ARG |
+| **构建沙箱里只有 GitHub 不可达** | 容器内 `github.com` SSL 握手超时，而 `pypi.org` / `download.pytorch.org` / `modelscope.cn` 都是 200 | torch 与 109 个依赖在容器里现装；**DiffSynth-Studio 以 tar 形式进构建上下文** |
+| **Docker Desktop 挂不了 WSL 里的路径** | `-v \\\\wsl.localhost\\Ubuntu\\...` → `accessing specified distro mount service: stat /run/guest-services/distro-services/ubuntu.sock` | 权重拷一份到 `D:\otherProject\minimax-h3\models`（27 GB，一次），容器挂这一份 |
+| **U 盘是 FAT32** | `E:` 57.7 GB，但**单文件上限 4 GiB**，而镜像 tar 远大于它 | 切 3.5 GB 分片 + `SHA256SUMS`，目标机器用 `join-and-load.ps1` 合并 |
+
+顺带把 §3 的两个老问题在镜像里解决掉了：
+
+- **torchcodec 的 FFmpeg**（§3.3）：`apt install ffmpeg` 装发行版 7.1 即可 —— torchcodec 0.16
+  自带 `core4~core9` 六个变体（对应 libavutil 56~61），导入时自动挑一个，不需要手编；
+- **torchaudio 的 CUDA 版本**（§3.1）：镜像从 `whl/test/cu132` 装三件套，与 conda 环境一致。
+
+### 13.3 镜像里有什么
+
+| 组件 | 版本 / 位置 |
+|---|---|
+| 基础镜像 | `python:3.14-slim`（Debian 13 trixie） |
+| Python | 3.14.7 —— 与 conda env 同一个小版本 |
+| torch / torchvision / torchaudio | 2.14.0+cu132 / 0.29.0+cu132 / 2.11.0+cu132 |
+| 其余依赖 | `docker/requirements.lock`，109 个包，逐行等于 WSL 里 `pip freeze` |
+| DiffSynth-Studio | 2.1.7，固定 commit `50e5efbc`，editable 装在 `/opt/h3/DiffSynth-Studio` |
+| 工作流 | `/workspace`（`run_h3.sh` + `env/` + `scripts/` + `references/` + `cache/*.json`） |
+| processor | `/opt/h3/processor`，11 MiB 兜底副本 |
+
+**权重不进镜像**（27 GB，挂 `/models`），而且**没有脚本能重新下载它们**：ModelScope 上的
+`MiniMax/MiniMax-H3` 只有全精度权重（transformer 13 分片 × 5 GB + text encoder 14 分片 × 4.6 GB），
+这几份 NF4 是社区量化版。这一条直接决定了「U 盘带不走整套」—— FAT32 连其中单个 15 GB 的文件都放不下。
+
+### 13.4 三条命令
+
+```powershell
+pwsh docker/build.ps1        # 构建：先在 WSL 侧准备上下文，再 docker build
+pwsh docker/run.ps1 check    # 运行：GPU、权重、工作区都自动接好（== ./run_h3.sh check）
+pwsh docker/pack-usb.ps1     # 导出：docker save → 3.5 GB 分片 → E:\minimax-h3\
+```
+
+目标机器上（U 盘里那个目录下）：
+
+```powershell
+pwsh -File .\join-and-load.ps1    # 校验分片 → 合并 → docker load
+```
+
+细节与排查表见 [`docker/README.md`](docker/README.md)。
+
+### 13.5 实测验证
+
+构建完成后在容器里逐项验过（2026-09-11，RTX 5070 Laptop / Docker Desktop 29.7.2）：
+
+| 检查 | 结果 |
+|---|---|
+| GPU 直通（`--gpus all`） | `torch.cuda.is_available() = True`；`NVIDIA GeForce RTX 5070 Laptop GPU`、7.93 GiB、**sm_120**；bf16 4096³ matmul 通过 |
+| Python / torch | 3.14.7 / 2.14.0+cu132（cuda 13.2）；`torchaudio 2.11.0+cu130` —— 正是 §3.1 说的那个"重打包成 cu132 的 cu130 构建"，与 WSL 侧完全一致 |
+| §3.3 的 FFmpeg | 容器里 `torchaudio.load` 与 `diffsynth.utils.data.audio.read_audio` **都通过**：发行版 FFmpeg 7.1.5（`libavutil.so.59`）命中 torchcodec 的 `core7` 变体，不用手编 |
+| 工作流自检 | `run.ps1 check` = `VALIDATION: 11/11 checks passed`；`h3_audit` 重算的结论与 WSL 侧逐项一致（`vram_limit 4.58`、torch+cudnn SDPA、beta 调度、四份权重的张量数 1572/2652/1285/…） |
+| 依赖完整性 | 镜像构建的最后一步会真的 import `torch / torchvision / torchaudio / torchcodec / bitsandbytes / transformers / diffsynth / MiniMaxH3Pipeline`，导入不过就构建失败 |
+| 镜像体积 | `docker images` 报 12.3 GB（磁盘占用口径），`docker inspect .Size` 3.9 GB（压缩层），`docker save` 出来的 tar 7.6 GB |
+
+不需要权重就能复现的冒烟测试（`docker/smoke.py` 随仓库挂进 `/workspace`）：
+
+```powershell
+pwsh docker/run.ps1 -NoTty python docker/smoke.py    # GPU + torchaudio + ffmpeg
+pwsh docker/run.ps1 check                            # 需要 27 GB 权重
+```
+
+**一个无害但值得知道的行为**：`check` 会重写 `cache/plan.json`，把里面**描述性**的 `path`
+字段改成当前环境看到的路径（容器里是 `/models/...`，WSL 里是 `/home/yhc/source/...`）。
+两个消费方都不读这个字段 —— `h3_generate.py:253` 与 `h3_validate.py:379` 分别只用
+`presets` 和由 `H3_MODELS` 现算的路径 —— 所以两边都不会因此出错。想让文件回到 WSL 版本：
+`git checkout -- cache/plan.json`。
+
+
 

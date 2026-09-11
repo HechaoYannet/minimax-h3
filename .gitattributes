@@ -1,0 +1,12 @@
+# Shell scripts are executed by bash both in WSL and inside the container; a CRLF
+# checkout turns "run_h3.sh" into "bash\r: No such file or directory".
+*.sh text eol=lf
+*.py text eol=lf
+
+# Media and checkpoints are binary and must never be line-ending mangled.
+*.mp4 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.mp3 binary
+*.safetensors binary

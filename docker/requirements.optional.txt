@@ -1,0 +1,14 @@
+# Optional extras from the original `pip install -e ".[all]"` that the inference
+# path never imports.  Install them into a derived image if you need training or
+# experiment logging:
+#
+#   FROM minimax-h3:2.1.7-cu132-py3.14
+#   COPY docker/requirements.optional.txt /tmp/
+#   RUN pip install -r /tmp/requirements.optional.txt
+#
+# deepspeed is the only one that has no wheel for cp314 on PyPI and therefore
+# builds from source (~5 min); everything else is a normal wheel.
+deepspeed==0.19.6
+cuda-toolkit==13.2.1
+cuda-bindings==13.3.1
+cuda-pathfinder==1.6.0
