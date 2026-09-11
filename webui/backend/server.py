@@ -452,6 +452,14 @@ class Handler(BaseHTTPRequestHandler):
         ff = shutil.which("ffprobe")
         checks.append({"name": "ffprobe（读参考素材尺寸）", "ok": bool(ff),
                        "detail": ff or "未找到：参考素材尺寸需要手填"})
+        ffm = shutil.which("ffmpeg")
+        mm = ds.get("multimodal") or {}
+        mm_on = bool(mm.get("enabled"))
+        checks.append({"name": "ffmpeg（多模态附图缩放/视频抽帧）",
+                       "ok": bool(ffm) or not mm_on,
+                       "detail": (ffm or "未找到")
+                       + ("；multimodal 已开启" if mm_on else "；multimodal 已关闭，不影响纯文本")
+                       + ("" if ffm else "；缺它就只能附未压缩的原图，视频抽帧不可用")})
         gpu = app.telemetry.current().get("gpu") or {}
         checks.append({"name": "nvidia-smi", "ok": bool(gpu.get("ok")),
                        "detail": gpu.get("name") or gpu.get("error")})
@@ -549,6 +557,8 @@ class Handler(BaseHTTPRequestHandler):
                 "key_source": (ds.get("api") or {}).get("key_source"),
                 "want_translation": (ds.get("prompt") or {}).get("want_translation", True),
                 "system_prompt_file": (ds.get("prompt") or {}).get("system_prompt_file"),
+                # 多模态附图配置（不含任何密钥），前端据此显示「附图 N 张」等提示
+                "multimodal": ds.get("multimodal") or {},
             },
             "wsl": {"distro": os.environ.get("WSL_DISTRO_NAME"),
                     "repo_root": cfg["root"], "repo_windows": wsl_to_windows(cfg["root"])},

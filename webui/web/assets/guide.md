@@ -13,6 +13,9 @@
    - 想做「改视频」→ 加**视频+音轨**（官方 tav2va 用法，也是「编辑」页签对应的模式）。
 3. **点「✦ 优化提示词」**。DeepSeek 会按 `references/` 里的官方规范，把中文改写成结构化英文提示词；
    三个页签分别是**英文提示词**（真正送进流水线的）、**中文回译**（给你校对，防止模型理解跑偏）、**结构说明**。
+   **参考图会作为真实图片一并发给模型（多模态）**，所以它写出来的人物外貌 / 服装 / 配色 / 场景
+   会尽量对齐你给的图，而不是凭空想象；状态行会写明「附图 N 张」，
+   「调试（system / user / 附图）」页签里能看到实际附了哪几张、缩放到了多大。
 4. **看预估**。参数卡片右上角一直显示：`seq` 长度、`s/步`、去噪耗时、总计、风险提示。
    觉得贵就先切 `blitz` 或 `fast` 预设试构图。
 5. **点「开始生成」**（或 `Ctrl+Enter`）。右边监控面板会实时显示阶段、步数、ETA、显存、日志。
@@ -92,6 +95,8 @@
 | `没有配置 DeepSeek API Key` | 没填 key | 见下一节 |
 | `HTTP 401` / `402` | Key 无效 / 余额不足 | 检查 `config/deepseek.yaml` |
 | 参考素材 `不存在` | 路径在 WSL 里不存在 | 用「+ 路径」把 Windows 路径粘进去，后端会自动翻译成 `/mnt/d/...` |
+| 优化状态行写「附图：无」但你加了参考图 | 图片被跳过：超预算 / 格式不认 / 读不到 | 看「调试（system / user / 附图）」与运行日志里的 `llm.multimodal` |
+| `HTTP 400` 且提到 image / content | 当前模型或网关不支持图片 | 把 `config/deepseek.yaml` 的 `multimodal.enabled` 改成 `false` |
 
 ## 六、日志与 LLM 调用记录（调试用）
 
@@ -109,8 +114,11 @@
 配置在 `config/deepseek.yaml`（**只有这一个文件**）：
 
 - `api.url` / `api.key`（也可以留空改用环境变量 `DEEPSEEK_API_KEY`）
-- `model.name`：`deepseek-chat` 或 `deepseek-reasoner`
+- `model.name`：默认 `deepseek-flash`（多模态旗舰，能看图）
 - `model.thinking`：思考模式开关与强度（`reasoning_effort`）
+- `multimodal`：附图开关与预算 —— `enabled` / `images` / `video_frames`（参考视频抽帧）/
+  `max_images` / `detail`（`low` 省 token，`high` 保细节）/ `max_edge` / `max_mb_per_image` / `max_mb_total`;
+  换到不支持图片的模型或中转网关时，把 `multimodal.enabled` 设成 `false` 即可退回纯文本
 - `prompt.system_prompt_file`：system prompt 文件，默认 `config/prompts/system.md`
 - `prompt.mode_digests`：三种结构规范（Ref2VA 六段式 / 单图关键帧 / 纯文本）
 

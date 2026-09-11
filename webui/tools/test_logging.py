@@ -16,6 +16,8 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import shutil
+import struct
 import sys
 import tempfile
 import threading
@@ -23,6 +25,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEBUI = os.path.dirname(HERE)
@@ -32,6 +35,7 @@ for p in (WEBUI, HERE):
         sys.path.insert(0, p)
 
 from backend import config as cfgmod          # noqa: E402
+from backend import media                     # noqa: E402
 from backend import promptopt                 # noqa: E402
 from backend import server                    # noqa: E402
 from backend.runlog import LLMRunStore, RunLog  # noqa: E402
@@ -209,6 +213,132 @@ class LLMRunStoreTest(unittest.TestCase):
         self.assertIsNotNone(store.get(ids[-1]))
 
 
+# --------------------------------------------------------------------------- 多模态附图
+def _png_bytes(w: int, h: int) -> bytes:
+    """造一张合法的最小 PNG（纯标准库，不依赖 Pillow）。"""
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)          # 8bit truecolor
+    row = b"\x00" + b"\xff\x00\x00" * w                          # filter + RGB
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(row * h)) + chunk(b"IEND", b""))
+
+
+def _jpeg_header_bytes(w: int, h: int) -> bytes:
+    """只有 SOI/APP0/SOF0/EOI 的 JPEG 头，够 media.dimensions 解析。"""
+    app0 = b"\xff\xe0" + struct.pack(">H", 16) + b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    sof0 = (b"\xff\xc0" + struct.pack(">H", 17) + b"\x08" + struct.pack(">HH", h, w)
+            + b"\x03" + b"\x01\x11\x00\x02\x11\x01\x03\x11\x01")
+    return b"\xff\xd8" + app0 + sof0 + b"\xff\xd9"
+
+
+def _bmp_bytes(w: int, h: int) -> bytes:
+    """24bit 未压缩 BMP（服务端不支持，用来验证「必须转换且不放大」）。"""
+    row = b"\x00\x00\xff" * w
+    row += b"\x00" * ((-len(row)) % 4)
+    data = row * h
+    dib = struct.pack("<IiiHHIIiiII", 40, w, h, 1, 24, 0, len(data), 2835, 2835, 0, 0)
+    fh = b"BM" + struct.pack("<IHHI", 14 + 40 + len(data), 0, 0, 14 + 40)
+    return fh + dib + data
+
+
+class MediaTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, name, data):
+        p = os.path.join(self.tmp.name, name)
+        with open(p, "wb") as f:
+            f.write(data)
+        return p
+
+    def test_sniff_by_content_not_extension(self):
+        png = _png_bytes(32, 16)
+        self.assertEqual(media.sniff(png), "png")
+        self.assertEqual(media.dimensions(png, "png"), (32, 16))
+        p = self._write("actually_a_png.jpg", png)       # 扩展名骗人，按内容判
+        with open(p, "rb") as f:
+            self.assertEqual(media.sniff(f.read()), "png")
+
+    def test_jpeg_gif_webp_dims(self):
+        jp = _jpeg_header_bytes(1200, 800)
+        self.assertEqual(media.sniff(jp), "jpeg")
+        self.assertEqual(media.dimensions(jp, "jpeg"), (1200, 800))
+
+        gif = b"GIF89a" + struct.pack("<HH", 320, 240) + b"\x00\x00\x00"
+        self.assertEqual(media.sniff(gif), "gif")
+        self.assertEqual(media.dimensions(gif, "gif"), (320, 240))
+
+        webp = (b"RIFF" + struct.pack("<I", 18) + b"WEBP" + b"VP8X"
+                + struct.pack("<I", 10) + b"\x00" + b"\x00\x00\x00"
+                + (640 - 1).to_bytes(3, "little") + (480 - 1).to_bytes(3, "little"))
+        self.assertEqual(media.sniff(webp), "webp")
+        self.assertEqual(media.dimensions(webp, "webp"), (640, 480))
+
+        self.assertIsNone(media.sniff(b"not an image at all"))
+        self.assertIsNone(media.dimensions(b"", "png"))
+
+    def test_prepare_small_image_passthrough(self):
+        p = self._write("ref.png", _png_bytes(64, 48))
+        m = media.prepare_image(p, max_edge=1280, detail="high")
+        self.assertTrue(m["ok"], m.get("error"))
+        self.assertEqual((m["width"], m["height"]), (64, 48))
+        self.assertEqual((m["sent_width"], m["sent_height"]), (64, 48))
+        self.assertFalse(m["resized"])
+        self.assertEqual(m["mime"], "image/png")
+        self.assertTrue(m["data_uri"].startswith("data:image/png;base64,"))
+        self.assertNotIn("data_uri", media.public_attachment(m))
+
+    def test_prepare_missing_or_bad_file(self):
+        m = media.prepare_image(os.path.join(self.tmp.name, "nope.png"))
+        self.assertFalse(m["ok"])
+        self.assertIn("不存在", m["error"])
+        bad = self._write("bad.bin", b"\x00\x01\x02\x03" * 200)
+        m = media.prepare_image(bad)
+        self.assertFalse(m["ok"])
+        self.assertTrue(m.get("error"))
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "需要 ffmpeg")
+    def test_ffmpeg_downscales_but_never_upscales(self):
+        big = self._write("big.png", _png_bytes(400, 300))
+        m = media.prepare_image(big, max_edge=100, detail="high")
+        self.assertTrue(m["ok"], m.get("error"))
+        self.assertTrue(m["resized"])
+        self.assertLessEqual(max(m["sent_width"], m["sent_height"]), 100)
+
+        small = self._write("small.bmp", _bmp_bytes(40, 30))   # 必须转格式
+        m2 = media.prepare_image(small, max_edge=1280, detail="high")
+        self.assertTrue(m2["ok"], m2.get("error"))
+        self.assertEqual(m2["mime"], "image/jpeg")
+        self.assertEqual((m2["sent_width"], m2["sent_height"]), (40, 30))  # 没被放大
+
+    def test_collect_respects_max_images_and_budget(self):
+        paths = [self._write(f"r{i}.png", _png_bytes(32, 32)) for i in range(4)]
+        refs = [{"kind": "image", "path": p, "name": os.path.basename(p),
+                 "label": f"<Picture {i + 1}>"} for i, p in enumerate(paths)]
+        mm = {"enabled": True, "images": True, "video_frames": 0, "max_images": 2,
+              "detail": "high", "max_edge": 1280, "max_mb_per_image": 20, "max_mb_total": 40}
+        atts, notes = media.collect_attachments(refs, mm)
+        self.assertEqual(len(atts), 2)
+        self.assertEqual([a["label"] for a in atts], ["<Picture 1>", "<Picture 2>"])
+        self.assertTrue(any("max_images" in n for n in notes))
+
+        atts, notes = media.collect_attachments(refs, dict(mm, enabled=False))
+        self.assertEqual(atts, [])
+        self.assertEqual(notes, [])
+
+        atts, notes = media.collect_attachments([{"kind": "image", "name": "x.png"}], mm)
+        self.assertEqual(atts, [])
+        self.assertTrue(notes)
+
+    def test_video_frame_missing_file_is_graceful(self):
+        m = media.prepare_video_frame(os.path.join(self.tmp.name, "nope.mp4"))
+        self.assertFalse(m["ok"])
+        self.assertTrue(m.get("error"))
+
+
 # --------------------------------------------------------------------------- HTTP 端点
 class ServerEndpointTest(unittest.TestCase):
     def setUp(self):
@@ -245,6 +375,9 @@ class ServerEndpointTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["logging"]["expose"])
         self.assertEqual(data["logging"]["llm_capture"], "full")
+        # 多模态配置要暴露给前端（至少带 enabled 字段），但不含任何密钥
+        self.assertIn("multimodal", data["deepseek"])
+        self.assertIn("enabled", data["deepseek"]["multimodal"])
 
         status, data, _ = _json_http("GET", self.base + "/api/logs?n=50")
         self.assertEqual(status, 200)
@@ -291,6 +424,113 @@ class ServerEndpointTest(unittest.TestCase):
         conn.close()
 
 
+# --------------------------------------------------------------------------- 优化路由端到端
+@unittest.skipIf(mock_deepseek is None, "mock_deepseek 不可用")
+class OptimizeRouteTest(unittest.TestCase):
+    """走一遍真正的 HTTP 路由 POST /api/optimize（SSE），再用 /api/llm/runs/<id> 取证。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        tmp = self.tmp.name
+        cfg = cfgmod.server_config()
+        cfg["paths"].update({"cache_dir": os.path.join(tmp, "cache"),
+                             "jobs_dir": os.path.join(tmp, "jobs"),
+                             "outputs_dir": os.path.join(tmp, "out"),
+                             "uploads_dir": os.path.join(tmp, "up")})
+        cfg["logging"].update({"dir": os.path.join(tmp, "logs"), "console": False,
+                               "level": "debug"})
+        cfg["server"]["host"] = "127.0.0.1"
+        cfg["server"]["port"] = 0
+        app, httpd = server.create(cfg)
+        self.app, self.httpd = app, httpd
+        self.port = httpd.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}"
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+
+        def _stop():
+            httpd.shutdown()
+            httpd.server_close()
+            app.telemetry.stop()
+            app.log.close()
+            if server.APP is app:
+                server.APP = None
+        self.addCleanup(_stop)
+
+        mock_deepseek.H.last_request = None
+        mock_deepseek.H.requests = []
+        self.mock = mock_deepseek.ThreadingHTTPServer(("127.0.0.1", 0), mock_deepseek.H)
+        threading.Thread(target=self.mock.serve_forever, daemon=True).start()
+        self.addCleanup(self.mock.shutdown)
+        self.addCleanup(self.mock.server_close)
+
+        self._orig = cfgmod.deepseek_config
+        self.addCleanup(lambda: setattr(cfgmod, "deepseek_config", self._orig))
+        mport = self.mock.server_address[1]
+        cfgmod.deepseek_config = lambda: {
+            "api": {"url": f"http://127.0.0.1:{mport}/chat/completions", "key": "sk-test",
+                    "key_present": True, "key_env": "DEEPSEEK_API_KEY",
+                    "timeout_s": 8, "max_retries": 0},
+            "model": {"name": "mock-model", "stream": True,
+                      "thinking": {"enabled": False}, "temperature": 0.7, "max_tokens": 100},
+            "prompt": {"system_prompt_inline": "路由测试用 system。", "want_translation": True},
+            "multimodal": {"enabled": True, "images": True, "video_frames": 0,
+                           "max_images": 8, "detail": "high", "max_edge": 1280,
+                           "max_mb_per_image": 20, "max_mb_total": 40},
+        }
+
+    def test_optimize_attaches_image(self):
+        path = os.path.join(self.tmp.name, "ref.png")
+        with open(path, "wb") as f:
+            f.write(_png_bytes(80, 60))
+        body = {"chinese": "雨夜的便利店门口", "width": 640, "height": 384,
+                "num_frames": 22, "steps": 4, "seed": 42,
+                "refs": [{"kind": "image", "path": path, "name": "ref.png",
+                          "label": "<Picture 1>"}]}
+        req = urllib.request.Request(self.base + "/api/optimize",
+                                     data=json.dumps(body).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"},
+                                     method="POST")
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode("utf-8", "replace")
+
+        events = []
+        for block in raw.split("\n\n"):
+            ev, data = "message", ""
+            for line in block.splitlines():
+                if line.startswith("event:"):
+                    ev = line[6:].strip()
+                elif line.startswith("data:"):
+                    data += line[5:].strip()
+            if data:
+                try:
+                    events.append((ev, json.loads(data)))
+                except json.JSONDecodeError:
+                    continue
+        kinds = [e for e, _ in events]
+        self.assertIn("meta", kinds)
+        self.assertIn("done", kinds)
+        meta = [d for e, d in events if e == "meta"][0]
+        self.assertEqual(meta["multimodal"]["images"], 1)
+        done = [d for e, d in events if e == "done"][0]
+
+        # 附图和真请求都要对得上
+        content = mock_deepseek.H.last_request["messages"][1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(
+            len([c for c in content if c.get("type") == "image_url"]), 1)
+
+        # 通过 HTTP 取回 LLM 记录：有附件元数据、没有图片本体
+        status, rec, _ = _json_http("GET", self.base + "/api/llm/runs/" + done["run_id"])
+        self.assertEqual(status, 200)
+        run = rec["run"]
+        self.assertEqual(run["request"]["image_count"], 1)
+        att = run["request"]["attachments"][0]
+        self.assertEqual(att["name"], "ref.png")
+        self.assertNotIn("data_uri", att)
+        self.assertNotIn("base64,", json.dumps(run, ensure_ascii=False))
+
+
 # --------------------------------------------------------------------------- LLM 端到端
 @unittest.skipIf(mock_deepseek is None, "mock_deepseek 不可用")
 class OptimizerLoggingTest(unittest.TestCase):
@@ -302,6 +542,8 @@ class OptimizerLoggingTest(unittest.TestCase):
         self.store = LLMRunStore(os.path.join(self.tmp.name, "llm"), self.log,
                                  capture="full", max_runs=20)
         self.opt = promptopt.Optimizer(self.log, self.store)
+        mock_deepseek.H.last_request = None
+        mock_deepseek.H.requests = []
         self.mock = mock_deepseek.ThreadingHTTPServer(("127.0.0.1", 0), mock_deepseek.H)
         self.addCleanup(self.mock.server_close)
         threading.Thread(target=self.mock.serve_forever, daemon=True).start()
@@ -311,7 +553,7 @@ class OptimizerLoggingTest(unittest.TestCase):
     def tearDown(self):
         cfgmod.deepseek_config = self._orig
 
-    def _patch(self, url=None, retries=0):
+    def _patch(self, url=None, retries=0, multimodal=None):
         port = self.mock.server_address[1]
         cfgmod.deepseek_config = lambda: {
             "api": {"url": url or f"http://127.0.0.1:{port}/chat/completions",
@@ -322,6 +564,7 @@ class OptimizerLoggingTest(unittest.TestCase):
                       "max_tokens": 100},
             "prompt": {"system_prompt_inline": "你是测试用提示词工程师。",
                        "want_translation": True},
+            "multimodal": multimodal or {"enabled": False},
         }
 
     def _req(self):
@@ -353,6 +596,53 @@ class OptimizerLoggingTest(unittest.TestCase):
         msgs = [r["event"] for r in self.log.tail(50, source="llm")]
         self.assertIn("llm.start", msgs)
         self.assertIn("llm.finish", msgs)
+
+    def test_multimodal_attaches_images(self):
+        path = os.path.join(self.tmp.name, "ref.png")
+        with open(path, "wb") as f:
+            f.write(_png_bytes(64, 48))
+        mm = {"enabled": True, "images": True, "video_frames": 0, "max_images": 8,
+              "detail": "high", "max_edge": 1280, "max_mb_per_image": 20,
+              "max_mb_total": 40}
+        self._patch(multimodal=mm)
+        req = self._req()
+        req["refs"] = [{"kind": "image", "path": path, "name": "ref.png",
+                        "label": "<Picture 1>"}]
+        events = list(self.opt.stream(req))
+        meta = [e for e in events if e["type"] == "meta"][0]
+        done = [e for e in events if e["type"] == "done"][0]
+        self.assertEqual(meta["multimodal"]["images"], 1)
+        self.assertEqual(meta["multimodal"]["attachments"][0]["name"], "ref.png")
+
+        # 真正发出去的请求：content 是块数组，含一个合法的 data:image_url
+        sent = mock_deepseek.H.last_request
+        content = sent["messages"][1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[0]["type"], "text")
+        self.assertIn("随本消息附上的图片", content[0]["text"])
+        imgs = [c for c in content if c.get("type") == "image_url"]
+        self.assertEqual(len(imgs), 1)
+        self.assertTrue(imgs[0]["image_url"]["url"].startswith("data:image/png;base64,"))
+        self.assertEqual(imgs[0]["image_url"]["detail"], "high")
+
+        run = self.store.get(done["run_id"])
+        self.assertEqual(run["request"]["image_count"], 1)
+        att = run["request"]["attachments"][0]
+        self.assertEqual(att["name"], "ref.png")
+        self.assertNotIn("data_uri", att)
+        # full 捕获会把 user 文本落盘，但 base64 图片本体绝不能进记录
+        with open(self.store._run_path(done["run_id"]), encoding="utf-8") as f:
+            self.assertNotIn("base64,", f.read())
+
+    def test_multimodal_disabled_keeps_plain_string(self):
+        self._patch(multimodal={"enabled": False})
+        req = self._req()
+        req["refs"] = [{"kind": "image", "path": "/nonexistent/x.png", "name": "x.png",
+                        "label": "<Picture 1>"}]
+        events = list(self.opt.stream(req))
+        meta = [e for e in events if e["type"] == "meta"][0]
+        self.assertEqual(meta["multimodal"]["images"], 0)
+        self.assertIsInstance(mock_deepseek.H.last_request["messages"][1]["content"], str)
 
     def test_client_disconnect_marks_aborted(self):
         self._patch()

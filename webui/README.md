@@ -41,6 +41,7 @@ webui/
     server.py                  HTTP 路由（REST + SSE）
     jobs.py                    作业排队/执行/进度转发/取消/错误归因
     promptopt.py               DeepSeek 调用 + 中文回译的标记流解析 + LLM 调用记录
+    media.py                   参考图/视频抽帧 -> OpenAI 兼容的多模态 image_url 块（纯标准库 + ffmpeg）
     runlog.py                  运行日志系统（结构化/落盘/订阅）+ LLM 调用记录仓库
     estimate.py                序列长度/耗时/风险预估（复用 scripts/h3_audit.py 的算法）
     telemetry.py               硬件遥测（nvidia-smi + /proc）
@@ -138,8 +139,23 @@ conda 环境里本来就有），不引 FastAPI/uvicorn。实测后端常驻内�
 
 ### 3.2 提示词优化流（SSE，`POST /api/optimize`）
 
-请求体 = 生成参数 + `chinese`（用户原话）+ `refs`（带 label 的参考清单）。
+请求体 = 生成参数 + `chinese`（用户原话）+ `refs`（带 label / path 的参考清单）。
 返回事件：`open` `meta` `thinking` `section` `delta` `done` `warn` `error`。
+
+**多模态**：开启了 `multimodal` 时，后端会用 `refs[*].path` 读本地参考图，按服务端约束缩放/转码后
+以 base64 附进 **user message 的 content 块数组**（OpenAI / DeepSeek 兼容格式）：
+
+```json
+{"role": "user", "content": [
+  {"type": "text", "text": "……（中文意图 + 参数 + 清单 + 附图编号）"},
+  {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,...", "detail": "high"}}
+]}
+```
+
+没有附图时 content 仍是**字符串**，请求体与旧版逐字节一致。`meta` 事件新增 `multimodal` 字段
+（`images` / `detail` / `attachments` / `notes`），前端据此显示「附图 N 张」，
+调试页签展示每张图的名称、尺寸、缩放与字节数。图片 base64 **不会**写进 LLM 调用记录
+（`/api/llm/runs/<id>` 只存附件元数据），日志里也只看得到 `images=n`。
 
 模型被要求在正文外包裹三段标记：
 
@@ -203,6 +219,31 @@ model:
 `both` 用于兼容性不明确的网关。被服务端拒绝时，报错原文会**原样返回给页面**，方便对着文档改。
 
 **配置是热读取的**：每次点「优化」都会重新解析这两个 yaml，改完刷新页面即可，不用重启服务。
+
+### 多模态附图（让模型真的看到参考图）
+
+`deepseek-flash` 能看图。开了 `multimodal` 后，参考图会随请求一起发过去，
+模型写人物/服装/配色/场景时会**以图为准**，而不是只根据你清单里的文件名想象。默认开：
+
+```yaml
+multimodal:
+  enabled: true          # false = 退回纯文本请求（与旧版逐字节一致）
+  images: true           # 附参考图
+  video_frames: 0        # 参考视频抽几帧当图片（0=不抽；1~4 有助于运镜/动作）
+  max_images: 8
+  detail: "high"         # low(服务端按 512x512) | high | original | auto
+  max_edge: 1280         # 附件长边上限；服务端 >约1300px 也会缩，再大只是浪费请求体
+  max_mb_per_image: 20   # 服务端硬上限 32
+  max_mb_total: 40       # 服务端请求体硬上限 48
+```
+
+- **怎么做的**：`webui/backend/media.py` 按**文件内容**判格式（不看扩展名），
+  用系统 `ffmpeg` 缩放/转码（`force_original_aspect_ratio` 会放大，所以改用 `min(iw,cap)` 钉死上界），
+  认不出的格式先用 `ffprobe` 确认 `codec_name` 属于图片，避免把二进制垃圾当图片发出去。
+- **失败不阻断**：某张图过大/格式不认/读不到时只记 `notes` 并跳过，
+  优化照常进行，前端会把这些 note 弹成警告。
+- **换到不支持图片的模型 / 网关**：把 `enabled` 设成 `false`；服务端拒绝时报错会原样返回页面。
+- 环境自检页会检查 `ffmpeg`；缺失时退化成「原图直传」（受 32 MiB 限制），视频抽帧不可用。
 
 ### 改提示词规范
 
@@ -273,9 +314,13 @@ max-long      832x480x243         31040   31040
   （框架的 `progress_bar_cmd` 就是逐步回调）。
 - **参考素材尺寸靠 ffprobe**：读不到就退化成按常见尺寸估算，预估面板会标 `estimated`。
 - **一次 OOM 仍然会污染后续配置**（这是工程本身的性质）：页面只能把 `wsl --shutdown` 的建议送到你面前。
-- **没有对真实 DeepSeek 端点做过联调**：仓库里没有 API Key。整条链路是用
-  `webui/tools/mock_deepseek.py` 按 OpenAI 流式格式离线验证的（SSE 解析、三段标记、错误分支、
-  无 Key 分支都覆盖到了）。第一次接真端点若字段名不符，把 `thinking.style` 换成 `both` 或 `thinking` 即可。
+- **已对真实 `deepseek-flash` 端点联调过**：纯文本与多模态（`{"type":"image_url","image_url":{"url":"data:...","detail":"high"}}`）
+  都返回 200，模型能正确读出图中内容。离线回归仍走 `webui/tools/mock_deepseek.py`
+  （本次新增：content 数组解析、图片计数、base64 可解性校验），SSE 解析 / 三段标记 / 错误分支 / 无 Key 分支都有覆盖。
+  若某个中转网关对 `thinking` 字段名不一致，把 `thinking.style` 换成 `both` 或 `thinking` 即可。
+- **多模态附图的三个服务端约束**（超出会 400）：单图 base64 ≤ 32 MiB、请求体 ≤ 48 MiB、单请求 ≤ 600 张。
+  `media.py` 默认按远低于这些值的预算工作（20 / 40 MiB），超预算的图片跳过并在日志里说明。
+  `refs` 里没有 `path` 的客户端（例如直接 curl `/api/optimize`）不会附图，只会在 `notes` 里提示。
 
 ---
 

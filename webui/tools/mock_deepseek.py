@@ -28,8 +28,41 @@ NOTES = """- 判断为 I2VA：只有一张参考图，按官方规范作为 0.00
 
 SECRET = "sk-mock-key"
 
+
+def _content_parts(req: dict):
+    """遍历 messages，返回所有 content 块（多模态时 user.content 是数组）。"""
+    for m in (req.get("messages") or []):
+        c = m.get("content")
+        if isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict):
+                    yield m, part
+
+
+def count_images(req: dict) -> tuple[int, int]:
+    """返回 (图片数, 图片字节数)。顺便校验 data: URL 的 base64 能解开。"""
+    import base64 as _b64
+
+    n = 0
+    total = 0
+    for _m, part in _content_parts(req):
+        if part.get("type") != "image_url":
+            continue
+        n += 1
+        url = ((part.get("image_url") or {}).get("url") or "")
+        if url.startswith("data:") and ";base64," in url:
+            try:
+                total += len(_b64.b64decode(url.split(";base64,", 1)[1]))
+            except Exception:
+                pass
+    return n, total
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # 离线自测用：最后一次请求体、以及本次进程收到的所有请求体
+    last_request = None
+    requests = []
 
     def log_message(self, *a):
         pass
@@ -50,9 +83,13 @@ class H(BaseHTTPRequestHandler):
             req = json.loads(raw.decode("utf-8"))
         except Exception:
             req = {}
-        print("[mock] model=%s stream=%s thinking=%s msgs=%d"
+        H.last_request = req
+        H.requests.append(req)
+        n_img, img_bytes = count_images(req)
+        print("[mock] model=%s stream=%s thinking=%s msgs=%d images=%d img_bytes=%d"
               % (req.get("model"), req.get("stream"),
-                 "reasoning_effort" in req or "thinking" in req, len(req.get("messages") or [])),
+                 "reasoning_effort" in req or "thinking" in req,
+                 len(req.get("messages") or []), n_img, img_bytes),
               flush=True)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")

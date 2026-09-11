@@ -467,14 +467,20 @@ class LLMRun:
 
     # -- 采集
     def set_request(self, payload: dict, system: str, user: str,
-                    system_sources: list[str] | None = None) -> None:
+                    system_sources: list[str] | None = None,
+                    attachments: list[dict] | None = None) -> None:
+        # payload 里的 messages 可能带 base64 图片（多模态），一律不落盘；
+        # 只留附件元数据（文件名/尺寸/字节数）。data_uri 再过一道，防止调用方手滑传进来。
         safe = {k: v for k, v in (payload or {}).items() if k != "messages"}
+        atts = [{k: v for k, v in (a or {}).items() if k != "data_uri"}
+                for a in (attachments or [])]
         with self._lock:
             self.request = {
                 "model": safe.get("model"), "stream": safe.get("stream"),
                 "params": {k: v for k, v in safe.items() if k not in ("model", "stream")},
                 "system_chars": len(system or ""), "user_chars": len(user or ""),
                 "system_sources": list(system_sources or []),
+                "image_count": len(atts), "attachments": atts,
             }
             if self.full:
                 self.request["system"] = self.store._clip(system or "")
@@ -548,6 +554,7 @@ class LLMRun:
             "thinking": self.meta.get("thinking"),
             "system_chars": self.request.get("system_chars"),
             "user_chars": self.request.get("user_chars"),
+            "images": self.request.get("image_count") or 0,
             "chunks": self.response.get("chunks"),
             "content_chars": self.response.get("content_chars"),
             "reasoning_chars": self.response.get("reasoning_chars"),
@@ -606,7 +613,8 @@ class LLMRunStore:
             self.log.info("LLM 调用开始", source="llm", event="llm.start", run=run.id,
                           model=run.model, mode=run.mode, url=run.url,
                           thinking=bool(meta.get("thinking")),
-                          stream=bool(meta.get("stream")), capture=self.capture)
+                          stream=bool(meta.get("stream")),
+                          images=int(meta.get("images") or 0), capture=self.capture)
         return run
 
     def _run_path(self, run_id: str) -> str:
@@ -635,6 +643,7 @@ class LLMRunStore:
                 status=run.status, duration_s=summary["duration_s"],
                 tokens=(run.usage or {}).get("total_tokens"),
                 content_chars=summary["content_chars"],
+                images=summary.get("images"),
                 error=summary["error"])
         return summary
 

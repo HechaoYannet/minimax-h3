@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 
 from . import config as cfgmod
+from . import media
 from .estimate import rows_for
 
 MARKERS = {
@@ -113,7 +114,30 @@ def _fmt_refs(refs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_user_message(req: dict, mode_key: str, mode_zh: str, mode_why: str) -> str:
+def _fmt_attachments(attachments: list[dict]) -> str:
+    """把「随消息附上的图片」列成清单。
+
+    多模态下 user content 是 [text, image_url, ...]，图片不带文件名；所以必须在文本里
+    把「第 i 张图 = 哪个参考素材标签」写清楚，模型才能把看到的画面和 <Picture n> 对上号。
+    """
+    lines = ["## 随本消息附上的图片（顺序即下面的编号，与「参考素材清单」一一对应）"]
+    for i, a in enumerate(attachments, 1):
+        label = a.get("label") or a.get("kind") or "图片"
+        sent = ""
+        if a.get("sent_width") and a.get("sent_height"):
+            sent = f"{int(a['sent_width'])}x{int(a['sent_height'])}"
+        orig = ""
+        if (a.get("width") and a.get("height")
+                and (a["width"], a["height"]) != (a.get("sent_width"), a.get("sent_height"))):
+            orig = f"（原图 {int(a['width'])}x{int(a['height'])}）"
+        note = f"；{a['note']}" if a.get("note") else ""
+        lines.append(f"{i}. {label} · {a.get('name')} · {sent}{orig}{note}")
+    lines.append("务必以这些图片的实际内容为准（人物外貌、服装、配色、场景、构图），不要凭文字想象。")
+    return "\n".join(lines)
+
+
+def build_user_message(req: dict, mode_key: str, mode_zh: str, mode_why: str,
+                       attachments: list[dict] | None = None) -> str:
     width, height, frames = int(req.get("width") or 832), int(req.get("height") or 480), \
         int(req.get("num_frames") or 124)
     fps = 24
@@ -139,6 +163,9 @@ def build_user_message(req: dict, mode_key: str, mode_zh: str, mode_why: str) ->
         f"参考 {'+'.join(str(rows[k]) for k in ('ref_image', 'ref_video', 'ref_audio'))} 行）",
         "## 参考素材清单（顺序即编号依据，不得改动）\n" + _fmt_refs(refs),
     ]
+    if attachments:
+        # 多模态附带图片：把「第 i 张图 = 哪个 <Picture n>/<Video n>」写死在文本里
+        blocks.append(_fmt_attachments(attachments))
     if wants:
         blocks.append("## 用户特别要求\n" + "\n".join(f"- {w}" for w in wants))
     blocks.append(
@@ -146,6 +173,29 @@ def build_user_message(req: dict, mode_key: str, mode_zh: str, mode_why: str) ->
         f"按「{mode_key}」的结构规范，写出这段 {secs:.2f} 秒视频的完整英文提示词，"
         "并在最后附上中文回译与简短说明。三个标记必须成对出现。")
     return "\n\n".join(blocks)
+
+
+def build_user_content(user_text: str, attachments: list[dict],
+                       detail: str | None) -> str | list:
+    """把 user 文本与图片附件拼成 OpenAI 兼容的 content。
+
+    没有附件时**原样返回字符串** —— 这样不开多模态时请求体与以前逐字节一致。
+    有附件时返回块数组：[{"type":"text",...}, {"type":"image_url",...}, ...]。
+    """
+    if not attachments:
+        return user_text
+    blocks: list[dict] = [{"type": "text", "text": user_text}]
+    for att in attachments:
+        uri = att.get("data_uri")
+        if not uri:
+            continue
+        img: dict = {"url": uri}
+        d = (detail or "").strip()
+        if d:
+            img["detail"] = d
+        blocks.append({"type": "image_url", "image_url": img})
+    # 所有附件都缺 data_uri 时退回纯文本，避免发出一个只有文本块的数组
+    return blocks if len(blocks) > 1 else user_text
 
 
 # --------------------------------------------------------------------------- API
@@ -191,12 +241,13 @@ class Optimizer:
         # llm_runs 是 runlog.LLMRunStore（可为 None：只用内存日志跑测试时）
         self.llm_runs = llm_runs
 
-    def _payload(self, cfg: dict, system: str, user: str) -> dict:
+    def _payload(self, cfg: dict, system: str, content) -> dict:
+        # content 可以是字符串（纯文本，历史行为），也可以是 content 块数组（多模态附图）
         model = cfg.get("model") or {}
         payload: dict = {
             "model": model.get("name") or "deepseek-chat",
             "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
+                         {"role": "user", "content": content}],
             "stream": bool(model.get("stream", True)),
         }
         if model.get("max_tokens"):
@@ -236,29 +287,39 @@ class Optimizer:
         refs = req.get("refs") or []
         mode_key, mode_zh, mode_why = infer_mode(refs)
         system, sources = build_system(cfg, mode_key)
-        user = build_user_message(req, mode_key, mode_zh, mode_why)
+        # 多模态：把本地参考图读成 base64 图片块附在 user message 上。失败只记 note，不阻断。
+        mm = cfg.get("multimodal") or {}
+        attachments, mm_notes = media.collect_attachments(refs, mm, log=self.log)
+        mm_public = [media.public_attachment(a) for a in attachments]
+        user = build_user_message(req, mode_key, mode_zh, mode_why, attachments)
+        content = build_user_content(user, attachments, mm.get("detail"))
         model = cfg.get("model") or {}
-        payload = self._payload(cfg, system, user)
+        payload = self._payload(cfg, system, content)
         url = api.get("url") or "https://api.deepseek.com/chat/completions"
         thinking = bool((model.get("thinking") or {}).get("enabled"))
         src_labels = [os.path.relpath(s, cfgmod.ROOT) if os.path.isabs(s) else s
                       for s in sources]
+        mm_info = {"enabled": bool(mm.get("enabled")), "images": len(attachments),
+                   "detail": mm.get("detail"), "attachments": mm_public,
+                   "notes": mm_notes}
 
         run = None
         if self.llm_runs is not None:
             run = self.llm_runs.begin({"model": payload.get("model"), "url": url,
                                        "mode": mode_key, "thinking": thinking,
-                                       "stream": bool(payload.get("stream"))})
-            run.set_request(payload, system, user, src_labels)
+                                       "stream": bool(payload.get("stream")),
+                                       "images": len(attachments)})
+            run.set_request(payload, system, user, src_labels, attachments=mm_public)
 
         self.log.info("promptopt: 请求 DeepSeek", source="llm", event="llm.request",
                       run=(run.id if run else None), model=payload.get("model"),
                       mode=mode_key, system_chars=len(system), user_chars=len(user),
+                      images=len(attachments),
                       thinking=thinking, stream=bool(payload.get("stream")), url=url)
 
         try:
             yield from self._stream_llm(run, api, model, payload, system, user, src_labels,
-                                        mode_key, mode_zh, mode_why, refs, url, req)
+                                        mode_key, mode_zh, mode_why, refs, url, req, mm_info)
         except GeneratorExit:
             # 前端关掉页面 / 主动断开：把这次调用如实标成 aborted，而不是假装成功
             if run is not None:
@@ -268,7 +329,7 @@ class Optimizer:
             raise
 
     def _stream_llm(self, run, api, model, payload, system, user, src_labels,
-                    mode_key, mode_zh, mode_why, refs, url, req):
+                    mode_key, mode_zh, mode_why, refs, url, req, mm_info):
         """真正发请求并解析流。由 stream() 包一层，专门处理「被中断」这种情况。"""
         headers = {"Content-Type": "application/json",
                    "Authorization": "Bearer " + api["key"],
@@ -282,6 +343,8 @@ class Optimizer:
                "reasoning_effort": payload.get("reasoning_effort"),
                "system_sources": src_labels,
                "system_prompt": system, "user_message": user,
+               "multimodal": mm_info or {"enabled": False, "images": 0,
+                                         "attachments": [], "notes": []},
                "url": api.get("url"), "run_id": (run.id if run else None)}
 
         def fail(message, detail=None, http_status=None, hint=None):

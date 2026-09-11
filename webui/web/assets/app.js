@@ -15,7 +15,7 @@ const S = {
   values: {},                 // 表单值 id -> value，取值口径来自 config/params.spec.json
   refs: [],                   // 参考素材
   mode: 'auto',
-  optimize: { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '', runId: '' },
+  optimize: { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '', runId: '', attachments: [] },
   estimate: null, risks: [], jobs: [], activeJob: null, telemetry: null,
   llm: { runs: [], stats: null },
   ui: { monitor: true, railCollapsed: false, view: 'create', promptPane: 'en',
@@ -879,7 +879,7 @@ async function optimize() {
       '或在 WSL 里 export DEEPSEEK_API_KEY 后重启服务。', 'err', 10000);
     return;
   }
-  S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: true, system: '', user: '', runId: '' };
+  S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: true, system: '', user: '', runId: '', attachments: [] };
   $('prompt-card').hidden = false;
   setPromptPanes();
   $('optimize-status').className = 'optimize-status';
@@ -893,8 +893,9 @@ async function optimize() {
     seed: S.values.seed,
     lora: S.values.lora,
     mode: S.mode,
-    refs: S.refs.map(r => ({ kind: r.kind, name: r.name, label: r.label, w: r.w, h: r.h,
-      frames: r.frames, seconds: r.seconds })),
+    // path 必须带上：后端要用它读参考图做多模态附图（只传元数据是看不到画面的）
+    refs: S.refs.map(r => ({ kind: r.kind, path: r.path, name: r.name, label: r.label,
+      w: r.w, h: r.h, frames: r.frames, seconds: r.seconds })),
   });
 
   let resp;
@@ -940,12 +941,18 @@ function handleOptimizeEvent(ev, obj) {
     S.optimize.mode = obj.mode_zh || obj.mode;
     S.optimize.system = obj.system_prompt || '';
     S.optimize.user = obj.user_message || '';
+    const mm = obj.multimodal || {};
+    S.optimize.attachments = mm.attachments || [];
+    const nImg = mm.images || S.optimize.attachments.length || 0;
     st.className = 'optimize-status';
     st.textContent = '模型 ' + obj.model +
       (obj.thinking ? '（思考模式 ' + (obj.reasoning_effort || '') + '）' : '') +
       ' · 结构 ' + (obj.mode_zh || obj.mode) +
+      (nImg ? '\n附图：' + nImg + ' 张参考图（detail=' + (mm.detail || 'high') + '，模型能直接看到画面）'
+            : (mm.enabled ? '\n附图：无（本次没有参考图，纯文本请求）' : '\n附图：多模态已关闭')) +
       '\n判定理由：' + (obj.mode_why || '') +
       '\n引用规范：' + (obj.system_sources || []).join(' + ');
+    (mm.notes || []).forEach((n) => toast(n, 'warn', 9000));
     setPromptPanes();
   } else if (ev === 'thinking') {
     S.optimize.thinking += obj.text || '';
@@ -986,9 +993,18 @@ function setPromptPanes() {
   $('pane-en').textContent = S.optimize.en || '';
   $('pane-zh').textContent = S.optimize.zh || '';
   $('pane-notes').textContent = S.optimize.notes || '';
+  const att = S.optimize.attachments || [];
+  const attTxt = att.length
+    ? att.map((a, i) => (i + 1) + '. ' + (a.label || a.kind || '') + ' · ' + (a.name || '') +
+        ' · ' + ((a.sent_width && a.sent_height) ? a.sent_width + 'x' + a.sent_height : '?') +
+        (a.resized ? '（已缩放' + ((a.width && a.height) ? '，原图 ' + a.width + 'x' + a.height : '') + '）' : '') +
+        (a.bytes_out ? ' · ' + fmtBytes(a.bytes_out) : '') +
+        (a.note ? ' · ' + a.note : '')).join('\n')
+    : '(无：多模态关闭、没有参考图，或附图失败)';
   $('pane-raw').textContent =
     '===== system prompt =====\n' + (S.optimize.system || '(尚未返回)') +
-    '\n\n===== user message =====\n' + (S.optimize.user || '(尚未返回)') +
+    '\n\n===== user message（文本部分）=====\n' + (S.optimize.user || '(尚未返回)') +
+    '\n\n===== 随消息附上的图片（多模态）=====\n' + attTxt +
     '\n\n===== 思考过程 =====\n' + (S.optimize.thinking || '(无 / 未开启思考模式)');
 }
 

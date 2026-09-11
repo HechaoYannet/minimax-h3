@@ -25,6 +25,20 @@ SERVER_YAML = os.path.join(ROOT, "config", "server.yaml")
 DEEPSEEK_YAML = os.path.join(ROOT, "config", "deepseek.yaml")
 PARAMS_SPEC = os.path.join(ROOT, "config", "params.spec.json")
 
+# deepseek.yaml 的 multimodal 段缺失时的默认值。deepseek-flash 本身是多模态模型，
+# 所以默认开启；换成不支持图片的模型（或网关）时，把它设成 enabled: false 即可
+# 退回纯文本请求。所有阈值都留了余量（服务端硬上限见 webui/backend/media.py）。
+MULTIMODAL_FALLBACK = {
+    "enabled": True,
+    "images": True,            # 附参考图
+    "video_frames": 0,         # 每个参考视频抽几帧（0=不抽）
+    "max_images": 8,           # 单次请求最多附几张
+    "detail": "high",          # low | high | original | auto
+    "max_edge": 1280,          # 附件长边上限（px）；0=不缩放
+    "max_mb_per_image": 20,    # 单图预算（服务端硬上限 32 MiB）
+    "max_mb_total": 40,        # 附件合计预算（服务端请求体上限 48 MiB）
+}
+
 # server.yaml 缺失时的兜底，保证服务永远起得来
 SERVER_FALLBACK = {
     "server": {"host": "0.0.0.0", "port": 8765, "open_browser": True},
@@ -70,7 +84,8 @@ def _deep_merge(base: dict, over: dict) -> dict:
 def _read_yaml(path: str) -> dict:
     if not os.path.exists(path):
         return {}
-    text = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
     if yaml is not None:
         try:
             return yaml.safe_load(text) or {}
@@ -165,6 +180,11 @@ def deepseek_config() -> dict:
             for kk, vv in md.items()
         }
     cfg["prompt"] = p
+
+    # 多模态附图：缺段/缺项都补默认值，前端 / 后端读到的永远是完整结构
+    mm = cfg.get("multimodal")
+    cfg["multimodal"] = _deep_merge(MULTIMODAL_FALLBACK,
+                                    mm if isinstance(mm, dict) else {})
     return cfg
 
 
