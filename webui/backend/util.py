@@ -10,7 +10,6 @@ import json
 import os
 import re
 import time
-import threading
 
 
 # --------------------------------------------------------------------------- 路径
@@ -60,66 +59,8 @@ def human_dur(seconds: float | None) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
-# --------------------------------------------------------------------------- 日志
-class Log:
-    """带环形缓冲的日志；页面可以拉取最近若干行做诊断。"""
-
-    _LEVELS = {"debug": 10, "info": 20, "warn": 30, "error": 40}
-
-    def __init__(self, capacity: int = 500, level: str = "info"):
-        self._buf: list[dict] = []
-        self._cap = capacity
-        self._level = self._LEVELS.get(level, 20)
-        self._lock = threading.Lock()
-        self._subs: list = []
-
-    def _emit(self, level: str, msg: str, **extra):
-        if self._LEVELS.get(level, 20) < self._level:
-            return
-        rec = {"t": iso(), "level": level, "msg": str(msg)}
-        rec.update(extra)
-        with self._lock:
-            self._buf.append(rec)
-            if len(self._buf) > self._cap:
-                del self._buf[: len(self._buf) - self._cap]
-            subs = list(self._subs)
-        for q in subs:
-            try:
-                q.put_nowait(rec)
-            except Exception:
-                pass
-
-    def debug(self, m, **k):
-        self._emit("debug", m, **k)
-
-    def info(self, m, **k):
-        self._emit("info", m, **k)
-
-    def warn(self, m, **k):
-        self._emit("warn", m, **k)
-
-    def error(self, m, **k):
-        self._emit("error", m, **k)
-
-    def tail(self, n: int = 200) -> list[dict]:
-        with self._lock:
-            return list(self._buf[-n:])
-
-    def subscribe(self):
-        import queue
-
-        q: "queue.Queue[dict]" = queue.Queue(maxsize=1000)
-        with self._lock:
-            self._subs.append(q)
-        return q
-
-    def unsubscribe(self, q):
-        with self._lock:
-            if q in self._subs:
-                self._subs.remove(q)
-
-
 # --------------------------------------------------------------------------- JSON
+# 运行日志见 runlog.py：结构化、可落盘、可订阅。这里只留与日志无关的小工具。
 def read_json(path: str, default=None):
     try:
         with open(path, encoding="utf-8") as f:

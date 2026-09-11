@@ -186,8 +186,10 @@ def _extract_delta(obj: dict) -> tuple[str, str]:
 
 
 class Optimizer:
-    def __init__(self, log):
+    def __init__(self, log, llm_runs=None):
         self.log = log
+        # llm_runs 是 runlog.LLMRunStore（可为 None：只用内存日志跑测试时）
+        self.llm_runs = llm_runs
 
     def _payload(self, cfg: dict, system: str, user: str) -> dict:
         model = cfg.get("model") or {}
@@ -216,10 +218,15 @@ class Optimizer:
         """生成器：yield 事件字典，供 SSE 直接转发。
 
         事件类型：meta / delta / section / done / error
+        LLM 每次调用都会在 self.llm_runs 里留下一条完整记录（见 runlog.LLMRunStore）：
+        请求参数、system / user 全文、流式输出、思考、tokens、耗时、报错、是否被中断。
+        页面上「日志 → LLM 调用记录」可以直接回看，服务重启也不丢。
         """
         cfg = cfgmod.deepseek_config()
         api = cfg.get("api") or {}
         if not api.get("key_present"):
+            self.log.warn("promptopt: 未配置 API Key，拒绝调用", source="llm",
+                          event="llm.no_key")
             yield {"type": "error",
                    "message": "没有配置 DeepSeek API Key",
                    "hint": f"在 config/deepseek.yaml 的 api.key 里填，"
@@ -232,25 +239,69 @@ class Optimizer:
         user = build_user_message(req, mode_key, mode_zh, mode_why)
         model = cfg.get("model") or {}
         payload = self._payload(cfg, system, user)
-
-        self.log.info("promptopt: 请求 DeepSeek", model=payload["model"], mode=mode_key,
-                      system_chars=len(system), user_chars=len(user),
-                      thinking=bool((model.get("thinking") or {}).get("enabled")))
-        yield {"type": "meta", "mode": mode_key, "mode_zh": mode_zh, "mode_why": mode_why,
-               "model": payload["model"],
-               "thinking": bool((model.get("thinking") or {}).get("enabled")),
-               "reasoning_effort": payload.get("reasoning_effort"),
-               "system_sources": [os.path.relpath(s, cfgmod.ROOT) if os.path.isabs(s) else s
-                                  for s in sources],
-               "system_prompt": system, "user_message": user,
-               "url": api.get("url")}
-
         url = api.get("url") or "https://api.deepseek.com/chat/completions"
+        thinking = bool((model.get("thinking") or {}).get("enabled"))
+        src_labels = [os.path.relpath(s, cfgmod.ROOT) if os.path.isabs(s) else s
+                      for s in sources]
+
+        run = None
+        if self.llm_runs is not None:
+            run = self.llm_runs.begin({"model": payload.get("model"), "url": url,
+                                       "mode": mode_key, "thinking": thinking,
+                                       "stream": bool(payload.get("stream"))})
+            run.set_request(payload, system, user, src_labels)
+
+        self.log.info("promptopt: 请求 DeepSeek", source="llm", event="llm.request",
+                      run=(run.id if run else None), model=payload.get("model"),
+                      mode=mode_key, system_chars=len(system), user_chars=len(user),
+                      thinking=thinking, stream=bool(payload.get("stream")), url=url)
+
+        try:
+            yield from self._stream_llm(run, api, model, payload, system, user, src_labels,
+                                        mode_key, mode_zh, mode_why, refs, url, req)
+        except GeneratorExit:
+            # 前端关掉页面 / 主动断开：把这次调用如实标成 aborted，而不是假装成功
+            if run is not None:
+                run.abort("客户端断开，SSE 生成器被关闭")
+                self.log.warn("promptopt: 客户端断开，LLM 调用中止", source="llm",
+                              event="llm.abort", run=run.id)
+            raise
+
+    def _stream_llm(self, run, api, model, payload, system, user, src_labels,
+                    mode_key, mode_zh, mode_why, refs, url, req):
+        """真正发请求并解析流。由 stream() 包一层，专门处理「被中断」这种情况。"""
         headers = {"Content-Type": "application/json",
                    "Authorization": "Bearer " + api["key"],
                    "Accept": "text/event-stream" if payload.get("stream") else "application/json"}
         timeout = float(api.get("timeout_s") or 300)
         retries = int(api.get("max_retries") or 0)
+
+        yield {"type": "meta", "mode": mode_key, "mode_zh": mode_zh, "mode_why": mode_why,
+               "model": payload["model"],
+               "thinking": bool((model.get("thinking") or {}).get("enabled")),
+               "reasoning_effort": payload.get("reasoning_effort"),
+               "system_sources": src_labels,
+               "system_prompt": system, "user_message": user,
+               "url": api.get("url"), "run_id": (run.id if run else None)}
+
+        def fail(message, detail=None, http_status=None, hint=None):
+            """统一的失败收尾：记录 -> 落盘 -> yield 错误事件。"""
+            if run is not None:
+                err = {"message": message}
+                if detail:
+                    err["detail"] = detail
+                if http_status:
+                    err["http_status"] = http_status
+                run.finish("error", err)
+            self.log.error("promptopt: LLM 调用失败", source="llm", event="llm.error",
+                           run=(run.id if run else None), error=message,
+                           http_status=http_status, detail=(detail or "")[:300])
+            ev = {"type": "error", "message": message, "run_id": (run.id if run else None)}
+            if detail:
+                ev["detail"] = detail
+            if hint:
+                ev["hint"] = hint
+            return ev
 
         attempt = 0
         while True:
@@ -272,21 +323,31 @@ class Optimizer:
                     msg += "：触发限流"
                 if e.code >= 500 and attempt < retries:
                     attempt += 1
+                    if run is not None:
+                        run.note_event("retry", msg, attempt=attempt, total=retries)
+                    self.log.warn("promptopt: DeepSeek 5xx，准备重试", source="llm",
+                                  event="llm.retry", run=(run.id if run else None),
+                                  http_status=e.code, attempt=attempt, retries=retries)
                     yield {"type": "warn", "message": f"{msg}，{attempt}/{retries} 次重试…"}
                     time.sleep(1.5 * attempt)
                     continue
-                yield {"type": "error", "message": msg, "detail": body,
-                       "hint": "检查 config/deepseek.yaml 的 api.url / api.key / model.name 是否与"
-                               "服务商文档一致；若开了 thinking，注意部分采样参数不被支持。"}
+                yield fail(msg, detail=body, http_status=e.code,
+                           hint="检查 config/deepseek.yaml 的 api.url / api.key / model.name 是否与"
+                                "服务商文档一致；若开了 thinking，注意部分采样参数不被支持。")
                 return
             except Exception as e:
                 if attempt < retries:
                     attempt += 1
+                    if run is not None:
+                        run.note_event("retry", f"请求失败：{e}", attempt=attempt, total=retries)
+                    self.log.warn("promptopt: 请求失败，准备重试", source="llm",
+                                  event="llm.retry", run=(run.id if run else None),
+                                  error=str(e), attempt=attempt, retries=retries)
                     yield {"type": "warn", "message": f"请求失败（{e}），{attempt}/{retries} 次重试…"}
                     time.sleep(1.5 * attempt)
                     continue
-                yield {"type": "error", "message": f"无法连接 DeepSeek：{e}",
-                       "hint": "确认本机（WSL 内）能访问外网；用 curl 试一下 api.url 更直观。"}
+                yield fail(f"无法连接 DeepSeek：{e}",
+                           hint="确认本机（WSL 内）能访问外网；用 curl 试一下 api.url 更直观。")
                 return
 
         # ---- 解析流 --------------------------------------------------------
@@ -341,12 +402,16 @@ class Optimizer:
                         state["usage"] = obj["usage"]
                     content, reasoning = _extract_delta(obj)
                     if reasoning:
+                        if run is not None:
+                            run.note_thinking(reasoning)
                         yield {"type": "thinking", "text": reasoning}
                     if content:
                         for section, chunk in feed(content):
                             if section == "section":
                                 yield {"type": "section", "section": chunk}
                             else:
+                                if run is not None:
+                                    run.note_delta(section, chunk)
                                 yield {"type": "delta", "section": section, "text": chunk}
             else:
                 raw = resp.read().decode("utf-8", "replace")
@@ -355,21 +420,28 @@ class Optimizer:
                     content, reasoning = _extract_delta(obj)
                     state["usage"] = obj.get("usage") or state["usage"]
                 except json.JSONDecodeError:
-                    yield {"type": "error", "message": "服务端返回的不是合法 JSON", "detail": raw[:600]}
+                    yield fail("服务端返回的不是合法 JSON", detail=raw[:600])
                     return
                 if reasoning:
+                    if run is not None:
+                        run.note_thinking(reasoning)
                     yield {"type": "thinking", "text": reasoning}
                 for section, chunk in feed(content):
                     if section != "section":
+                        if run is not None:
+                            run.note_delta(section, chunk)
                         yield {"type": "delta", "section": section, "text": chunk}
         except Exception as e:
-            yield {"type": "error", "message": f"读取响应流失败：{e}"}
+            yield fail(f"读取响应流失败：{e}")
             return
 
         text = {k: v.strip() for k, v in state["text"].items()}
         missing = [k for k in order if not text.get(k)]
+        if run is not None:
+            run.set_usage(state["usage"])
+            run.finish("ok", missing=missing)
         yield {"type": "done", "result": text.get("prompt", ""),
                "translation": text.get("translation", ""), "notes": text.get("notes", ""),
                "missing": missing, "usage": state["usage"],
-               "refs": refs, "mode": mode_key,
+               "refs": refs, "mode": mode_key, "run_id": (run.id if run else None),
                "duration_s": round(int(req.get("num_frames") or 0) / 24.0, 2)}

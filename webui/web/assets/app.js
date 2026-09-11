@@ -15,9 +15,11 @@ const S = {
   values: {},                 // 表单值 id -> value，取值口径来自 config/params.spec.json
   refs: [],                   // 参考素材
   mode: 'auto',
-  optimize: { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '' },
+  optimize: { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '', runId: '' },
   estimate: null, risks: [], jobs: [], activeJob: null, telemetry: null,
-  ui: { monitor: true, railCollapsed: false, view: 'create', promptPane: 'en' },
+  llm: { runs: [], stats: null },
+  ui: { monitor: true, railCollapsed: false, view: 'create', promptPane: 'en',
+        logLevel: 'info', logSource: 'all', logQ: '', logFollow: true },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -90,6 +92,7 @@ async function boot() {
     buildRefButtons();
     renderPanelDocs();
     bindEvents();
+    applyLoggingConfig(cfg);
     startTelemetry();
     startLogStream();
     await refreshJobs();
@@ -784,10 +787,22 @@ function bindEvents() {
     S.ui.promptPane = t.dataset.pane;
     ['en', 'zh', 'notes', 'raw'].forEach(p => { $('pane-' + p).hidden = (p !== S.ui.promptPane); });
   });
+  // 运行日志页签
+  $('btn-open-logs').onclick = () => selectView('logs');
+  $('log-level').onchange = () => { S.ui.logLevel = $('log-level').value; startFullLogStream(true); };
+  $('log-source').onchange = () => { S.ui.logSource = $('log-source').value; startFullLogStream(true); };
+  $('btn-log-search').onclick = () => { S.ui.logQ = $('log-search').value.trim(); startFullLogStream(true); };
+  $('log-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btn-log-search').onclick(); });
+  $('btn-log-refresh').onclick = () => { startFullLogStream(true); loadLlmRuns(); toast('日志流已重连', 'ok', 2200); };
+  $('btn-log-download').onclick = downloadLogs;
+  $('btn-log-clear').onclick = clearLogs;
+  $('btn-llm-refresh').onclick = loadLlmRuns;
+  $('log-follow').onchange = () => { S.ui.logFollow = $('log-follow').checked; };
+  $('log-wrap').onchange = () => $('log-full').classList.toggle('nowrap', !$('log-wrap').checked);
   $('new-session').onclick = () => {
     S.refs = []; renderRefs();
     $('prompt-input').value = '';
-    S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '' };
+    S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '', runId: '' };
     $('prompt-card').hidden = true;
     scheduleEstimate();
     toast('已清空当前创作（生成参数保持不变）', 'ok', 2600);
@@ -847,10 +862,11 @@ async function refreshAll() {
 }
 
 function selectView(v) {
-  ['create', 'library', 'guide', 'about'].forEach(x => { $('view-' + x).hidden = (x !== v); });
+  ['create', 'library', 'guide', 'logs', 'about'].forEach(x => { $('view-' + x).hidden = (x !== v); });
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   S.ui.view = v;
   if (v === 'library') renderLibrary();
+  if (v === 'logs') { startFullLogStream(false); loadLlmRuns(); }
 }
 
 /* ------------------------------------------------------------------ 提示词优化 */
@@ -863,7 +879,7 @@ async function optimize() {
       '或在 WSL 里 export DEEPSEEK_API_KEY 后重启服务。', 'err', 10000);
     return;
   }
-  S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: true, system: '', user: '' };
+  S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: true, system: '', user: '', runId: '' };
   $('prompt-card').hidden = false;
   setPromptPanes();
   $('optimize-status').className = 'optimize-status';
@@ -920,6 +936,7 @@ async function optimize() {
 function handleOptimizeEvent(ev, obj) {
   const st = $('optimize-status');
   if (ev === 'meta') {
+    S.optimize.runId = obj.run_id || '';
     S.optimize.mode = obj.mode_zh || obj.mode;
     S.optimize.system = obj.system_prompt || '';
     S.optimize.user = obj.user_message || '';
@@ -982,7 +999,16 @@ function finishOptimize(msg, isErr) {
   const st = $('optimize-status');
   st.className = 'optimize-status ' + (isErr ? 'err' : 'ok');
   st.textContent = msg;
-  if (!isErr) toast('提示词已生成（' + (S.optimize.mode || '') + '），可直接开始生成', 'ok', 4200);
+  if (!isErr) {
+    // 这次调用的完整记录已经落盘：给一个直达入口，方便回看 system/user/输出/think
+    if (S.optimize.runId) {
+      const link = el('button', 'link-btn', ' → 查看本次 LLM 调用记录');
+      link.onclick = () => openLlmRun(S.optimize.runId);
+      st.appendChild(link);
+    }
+    toast('提示词已生成（' + (S.optimize.mode || '') + '），可直接开始生成', 'ok', 4200);
+    if (S.ui.view === 'logs') loadLlmRuns();
+  }
 }
 
 /* ------------------------------------------------------------------ 提交生成 */
@@ -1148,7 +1174,7 @@ function openJobStream(jobId) {
   S.activeJob = jobId;
   const box = $('log-stream');
   box.textContent = '';
-  appendLog({ level: 'info', msg: '—— 关注作业 ' + jobId + ' ——' });
+  appendLog({ level: 'info', source: 'job', msg: '—— 关注作业 ' + jobId + ' ——' });
   if (!window.EventSource) return;
   if (jobSources.active) { jobSources.active.close(); }
   const es = new EventSource('/api/jobs/' + jobId + '/stream?from=0');
@@ -1156,14 +1182,14 @@ function openJobStream(jobId) {
   const handler = (name) => (e) => {
     let obj = {};
     try { obj = JSON.parse(e.data); } catch (err) { }
-    if (name === 'log') appendLog({ level: guessLevel(obj.line), msg: obj.line });
+    if (name === 'log') appendLog({ level: guessLevel(obj.line), source: 'job', msg: obj.line });
     else if (name === 'step') updateJobFromEvent(jobId, obj);
-    else if (name === 'stage') appendLog({ level: 'info', msg: '▸ [' + (obj.stage_zh || obj.stage) + '] ' + (obj.info || '') });
-    else if (name === 'result') appendLog({ level: 'ok', msg: '产物：' + (obj.out || '(见作业详情)') });
-    else if (name === 'warn') appendLog({ level: 'warn', msg: obj.message || JSON.stringify(obj) });
-    else if (name === 'error') appendLog({ level: 'error', msg: obj.message || JSON.stringify(obj) });
+    else if (name === 'stage') appendLog({ level: 'info', source: 'job', msg: '▸ [' + (obj.stage_zh || obj.stage) + '] ' + (obj.info || '') });
+    else if (name === 'result') appendLog({ level: 'ok', source: 'job', msg: '产物：' + (obj.out || '(见作业详情)') });
+    else if (name === 'warn') appendLog({ level: 'warn', source: 'job', msg: obj.message || JSON.stringify(obj) });
+    else if (name === 'error') appendLog({ level: 'error', source: 'job', msg: obj.message || JSON.stringify(obj) });
     else if (name === 'exit') {
-      appendLog({ level: obj.code === 0 ? 'ok' : 'error',
+      appendLog({ level: obj.code === 0 ? 'ok' : 'error', source: 'job',
         msg: '作业结束：' + obj.status + (obj.error ? ' — ' + obj.error : '') });
       refreshJobs();
       es.close();
@@ -1190,25 +1216,246 @@ function guessLevel(line) {
   return 'info';
 }
 
-function appendLog(rec) {
-  const box = $('log-stream');
-  const line = el('div', 'l-' + (rec.level || 'info'));
-  line.textContent = (rec.t && rec.msg === undefined) ? '' : (rec.msg === undefined ? JSON.stringify(rec) : rec.msg);
-  box.appendChild(line);
-  while (box.childNodes.length > 1500) box.removeChild(box.firstChild);
-  if ($('chk-autoscroll').checked) box.scrollTop = box.scrollHeight;
+/* ------------------------------------------------------------------ 运行日志
+ * 两条 SSE：监控面板的小窗（只看 info+）、「运行日志」页签的大窗（按等级/来源/关键字
+ * 服务端过滤）。LLM 调用记录走 /api/llm/runs，单独渲染成表格 + 详情弹窗。
+ */
+const logEs = {};
+const LOG_KEYS = ['seq', 't', 'iso', 'level', 'source', 'event', 'msg'];
+
+function logsExposed() {
+  return ((S.cfg || {}).logging || {}).expose !== false;
+}
+
+function shortVal(v) {
+  let s = (typeof v === 'string') ? v : JSON.stringify(v);
+  if (s === undefined || s === null) s = '';
+  return s.length > 110 ? s.slice(0, 110) + '…' : s;
+}
+
+function logLine(rec) {
+  const level = rec.level || 'info';
+  const row = el('div', 'lline l-' + level + (rec.source ? ' src-' + rec.source : ''));
+  const iso = String(rec.iso || rec.t || '');
+  row.appendChild(el('span', 'lt', iso.length >= 23 ? iso.slice(11, 23) : iso));
+  if (rec.source) row.appendChild(el('span', 'ls', rec.source));
+  row.appendChild(el('span', 'lm', rec.msg === undefined ? JSON.stringify(rec) : rec.msg));
+  const extras = {};
+  Object.keys(rec).forEach((k) => {
+    if (LOG_KEYS.indexOf(k) >= 0) return;
+    if (rec[k] === null || rec[k] === undefined || rec[k] === '') return;
+    extras[k] = rec[k];
+  });
+  const keys = Object.keys(extras);
+  if (keys.length) {
+    const x = el('span', 'lx', keys.map(k => k + '=' + shortVal(extras[k])).join(' '));
+    try { x.title = JSON.stringify(extras, null, 2); } catch (e) { }
+    row.appendChild(x);
+  }
+  return row;
+}
+
+function appendLog(rec, boxId) {
+  const target = boxId || 'log-stream';
+  const box = $(target);
+  if (!box) return;
+  box.appendChild(logLine(rec));
+  while (box.childNodes.length > 1200) box.removeChild(box.firstChild);
+  const follow = target === 'log-full'
+    ? ($('log-follow') ? $('log-follow').checked : true)
+    : ($('chk-autoscroll') ? $('chk-autoscroll').checked : true);
+  if (follow) box.scrollTop = box.scrollHeight;
 }
 
 function startLogStream() {
-  if (!window.EventSource) return;
-  if (((S.cfg.server || {}).expose_server_log) === false) return;
-  const es = new EventSource('/api/logs/stream');
+  if (!window.EventSource || !logsExposed()) return;
+  if ((((S.cfg || {}).server) || {}).expose_server_log === false) return;
+  if (logEs.monitor) logEs.monitor.close();
+  const es = new EventSource('/api/logs/stream?level=info');
+  logEs.monitor = es;
+  es.addEventListener('snapshot', (e) => {
+    let d = {};
+    try { d = JSON.parse(e.data); } catch (err) { }
+    updateLogStats(d.stats, d.llm);
+  });
   es.addEventListener('log', (e) => {
     let rec = {};
     try { rec = JSON.parse(e.data); } catch (err) { }
-    if (rec.level === 'debug') return;
-    appendLog(rec);
+    appendLog(rec, 'log-stream');
   });
+}
+
+function startFullLogStream(clear) {
+  if (!window.EventSource || !logsExposed()) return;
+  if (logEs.full) { logEs.full.close(); logEs.full = null; }
+  const box = $('log-full');
+  if (clear && box) box.textContent = '';
+  const qs = new URLSearchParams({ level: S.ui.logLevel || 'all', source: S.ui.logSource || 'all' });
+  if (S.ui.logQ) qs.set('q', S.ui.logQ);
+  const es = new EventSource('/api/logs/stream?' + qs.toString());
+  logEs.full = es;
+  es.addEventListener('snapshot', (e) => {
+    let d = {};
+    try { d = JSON.parse(e.data); } catch (err) { }
+    updateLogStats(d.stats, d.llm);
+  });
+  es.addEventListener('log', (e) => {
+    let rec = {};
+    try { rec = JSON.parse(e.data); } catch (err) { }
+    appendLog(rec, 'log-full');
+  });
+}
+
+function updateLogStats(stats, llm) {
+  if (stats && $('mon-log-level')) $('mon-log-level').textContent = '(' + (stats.level || '') + ')';
+  const host = $('log-stats');
+  if (!stats || !host) return;
+  const c = stats.counts || {};
+  host.textContent =
+    '等级 ' + stats.level + ' · 内存 ' + stats.retained + '/' + stats.capacity +
+    ' 条 · 已滚出 ' + stats.evicted +
+    ' · debug ' + (c.debug || 0) + ' / info ' + (c.info || 0) +
+    ' / warn ' + (c.warn || 0) + ' / error ' + (c.error || 0) +
+    ' · 文件 ' + (stats.files || []).length + ' 个 ' +
+    ((stats.file_bytes || 0) / 1024).toFixed(1) + ' KiB' +
+    (stats.file_error ? ' · ⚠ 写盘错误 ' + stats.file_error : '') +
+    (llm ? ' · LLM 记录 ' + llm.runs + ' 份' : '');
+}
+
+function applyLoggingConfig(cfg) {
+  const L = (cfg && cfg.logging) || {};
+  const expose = L.expose !== false;
+  const nav = document.querySelector('.nav-item[data-view="logs"]');
+  if (nav) nav.hidden = !expose;
+  if ($('log-level') && L.level) $('log-level').value = (L.level === 'debug' ? 'all' : L.level);
+  if ($('mon-log-level') && L.level) $('mon-log-level').textContent = '(' + L.level + ')';
+  if ($('logs-intro')) {
+    $('logs-intro').textContent = expose
+      ? '日志同时写入内存环缓冲与磁盘：' + (L.dir || 'cache/webui/logs') +
+        '（JSONL，服务重启也不丢）。LLM 每次调用单独一份完整记录，见下方表格。'
+      : '运行日志未对外暴露（config/server.yaml → logging.expose=false）。';
+  }
+}
+
+function downloadLogs() {
+  const qs = new URLSearchParams({ level: S.ui.logLevel || 'all',
+    source: S.ui.logSource || 'all', format: 'txt', n: '5000' });
+  if (S.ui.logQ) qs.set('q', S.ui.logQ);
+  const a = document.createElement('a');
+  a.href = '/api/logs/download?' + qs.toString();
+  a.download = '';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+async function clearLogs() {
+  if (!window.confirm('清空内存里的日志缓冲？（磁盘上的 JSONL 文件保留，仍可下载）')) return;
+  try {
+    await api('/api/logs/clear', { method: 'POST', body: JSON.stringify({ files: false }) });
+  } catch (e) { toast('清空失败：' + e.message, 'err'); return; }
+  const box = $('log-full');
+  if (box) box.textContent = '';
+  toast('日志缓冲已清空', 'ok', 2400);
+}
+
+async function loadLlmRuns() {
+  if (!logsExposed()) return;
+  try {
+    const d = await api('/api/llm/runs?limit=50');
+    S.llm.runs = d.runs || [];
+    S.llm.stats = d.stats || null;
+    renderLlmRuns();
+  } catch (e) { /* 页签可能被隐藏，忽略 */ }
+}
+
+function renderLlmRuns() {
+  const tbl = $('llm-table');
+  if (!tbl) return;
+  const tb = tbl.querySelector('tbody');
+  tb.innerHTML = '';
+  if (!S.llm.runs.length) {
+    const tr = document.createElement('tr');
+    const td = el('td', 'muted', '还没有调用记录：点一次「优化提示词」就会出现。');
+    td.colSpan = 9; tr.appendChild(td); tb.appendChild(tr);
+    return;
+  }
+  S.llm.runs.forEach((r) => {
+    const tr = document.createElement('tr');
+    const u = r.usage || {};
+    const oc = r.output_chars || {};
+    [r.started, '', r.model || '', r.mode || '', u.total_tokens || '--',
+     (r.duration_s || 0).toFixed(2) + 's',
+     (oc.prompt || 0) + ' / ' + (oc.translation || 0) + ' / ' + (oc.notes || 0),
+     r.error || ''].forEach(c => tr.appendChild(el('td', null, c)));
+    const cls = r.status === 'ok' ? 'ok' : (r.status === 'error' ? 'err' : 'warn');
+    tr.children[1].innerHTML = '<span class="badge ' + cls + '">' + esc(r.status) + '</span>';
+    const td = el('td');
+    const b = el('button', 'ghost-btn sm', '详情');
+    b.onclick = () => openLlmRun(r.id);
+    td.appendChild(b);
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  });
+}
+
+async function openLlmRun(id) {
+  let d;
+  try { d = await api('/api/llm/runs/' + encodeURIComponent(id)); }
+  catch (e) { toast('读取调用记录失败：' + e.message, 'err'); return; }
+  const run = d.run || {};
+  const req = run.request || {}, res = run.response || {}, out = res.sections || {};
+  const box = el('div');
+  const sec = (title, text) => {
+    if (!text) return;
+    box.appendChild(el('h4', null, title));
+    box.appendChild(el('pre', 'llm-json', text));
+  };
+  box.appendChild(el('div', 'muted tiny',
+    'run ' + run.id + ' · ' + run.status + ' · ' + (run.duration_s || 0) + 's' +
+    (run.usage && run.usage.total_tokens ? ' · tokens ' + run.usage.total_tokens : '') +
+    (run.capture ? ' · capture=' + run.capture : '')));
+  sec('system prompt（引用：' + (((req.system_sources || []).join(', ')) || '-') + '）',
+    req.system || '（未保存全文；字符数 ' + (req.system_chars || 0) + '）');
+  sec('user message', req.user || '（未保存全文；字符数 ' + (req.user_chars || 0) + '）');
+  sec('英文提示词（送进流水线）', out.prompt);
+  sec('中文回译', out.translation);
+  sec('结构说明', out.notes);
+  if (res.thinking) sec('思考过程', res.thinking);
+  else if (res.reasoning_chars) sec('思考过程', '（未保存全文；共 ' + res.reasoning_chars + ' 字符）');
+  if ((run.events || []).length) {
+    sec('事件', run.events.map(e => e.t + '  [' + e.kind + '] ' + e.message).join('\n'));
+  }
+  box.appendChild(el('h4', null, '请求参数 / usage'));
+  box.appendChild(el('pre', 'llm-json', JSON.stringify({
+    model: req.model, stream: req.stream, params: req.params,
+    usage: run.usage, missing: res.missing || [],
+  }, null, 2)));
+  confirmModal('LLM 调用记录 ' + run.id, box, '下载 JSON', () => {
+    const blob = new Blob([JSON.stringify(run, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'llm-run-' + run.id + '.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  });
+}
+
+/* 前端主动上报：前端异常/关键动作也进同一份运行日志，和用户看到的报错对得上 */
+function clientLog(level, msg, extra) {
+  if (!logsExposed()) return;
+  const rec = Object.assign({
+    level: level, source: 'ui', event: 'ui.event', msg: String(msg),
+    page: location.pathname,
+  }, extra || {});
+  try {
+    if (navigator.sendBeacon) {
+      const blob = new Blob([JSON.stringify(rec)], { type: 'application/json' });
+      if (navigator.sendBeacon('/api/logs/client', blob)) return;
+    }
+  } catch (e) { /* 退回到 fetch */ }
+  fetch('/api/logs/client', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(rec), keepalive: true,
+  }).catch(() => { });
 }
 
 /* ------------------------------------------------------------------ 遥测 */
@@ -1557,12 +1804,16 @@ setInterval(saveSession, 10000);
 
 /* 前端异常也进日志面板：用户看到的报错和页面上的日志能对上，不用去猜。 */
 window.addEventListener('error', (e) => {
-  appendLog({ level: 'error', msg: '[前端异常] ' + (e.message || e.type) +
-    (e.filename ? ' @ ' + String(e.filename).split('/').pop() + ':' + e.lineno : '') });
+  const msg = '[前端异常] ' + (e.message || e.type) +
+    (e.filename ? ' @ ' + String(e.filename).split('/').pop() + ':' + e.lineno : '');
+  appendLog({ level: 'error', source: 'ui', msg: msg });
+  clientLog('error', msg, { event: 'ui.js_error', stack: e.error && e.error.stack ? String(e.error.stack).slice(0, 1500) : '' });
 });
 window.addEventListener('unhandledrejection', (e) => {
   const r = e.reason;
-  appendLog({ level: 'error', msg: '[前端 Promise 未处理] ' + ((r && (r.message || r)) || 'unknown') });
+  const msg = '[前端 Promise 未处理] ' + ((r && (r.message || r)) || 'unknown');
+  appendLog({ level: 'error', source: 'ui', msg: msg });
+  clientLog('error', msg, { event: 'ui.unhandled_rejection', stack: r && r.stack ? String(r.stack).slice(0, 1500) : '' });
 });
 
 document.addEventListener('DOMContentLoaded', boot);

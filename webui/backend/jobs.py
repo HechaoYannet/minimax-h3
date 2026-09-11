@@ -23,6 +23,7 @@ import time
 import uuid
 
 from .estimate import estimate, risks
+from .runlog import BoundLog
 from .util import (append_jsonl, iso, now, read_json, safe_rel, tail_lines, write_json)
 
 PROGRESS_PREFIX = "@@H3@@ "
@@ -66,6 +67,7 @@ class Job:
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._last_emit = 0.0
+        self.rlog = None                     # 绑定到运行日志的记录器（由 JobManager 注入）
 
     # ---------------------------------------------------------------- 事件
     def emit(self, ev: dict, persist: bool = True):
@@ -171,7 +173,8 @@ class JobManager:
         except OSError:
             pass
         if killed:
-            self.log.warn(f"清理了上次残留的生成进程：{killed}")
+            self.log.warn(f"清理了上次残留的生成进程：{killed}",
+                          source="sys", event="job.reap", pids=killed)
 
     # ---------------------------------------------------------------- 持久化
     def _load_from_disk(self):
@@ -219,8 +222,15 @@ class JobManager:
             j._lock = threading.Lock()
             j._cancel = threading.Event()
             j._last_emit = 0.0
+            j.rlog = self.log.child(source="job", job=jid)
             self.jobs[jid] = j
             self.order.append(jid)
+
+    def _jlog(self, j: Job) -> BoundLog:
+        """作业专属记录器：每条日志自带 source='job' 与 job=<id>，页面可按作业筛。"""
+        if getattr(j, "rlog", None) is None:
+            j.rlog = self.log.child(source="job", job=j.id)
+        return j.rlog
 
     # ---------------------------------------------------------------- 提交
     def submit(self, request: dict, cmd: list[str]) -> Job:
@@ -231,8 +241,17 @@ class JobManager:
                  "events": os.path.join(d, "events.jsonl"),
                  "log": os.path.join(d, "run.log")}
         j = Job(jid, request, cmd, paths, self.root)
+        j.rlog = self.log.child(source="job", job=jid)
         j.emit({"type": "submitted", "request": {k: v for k, v in request.items()
                                                  if not k.startswith("_")}})
+        self._jlog(j).info("作业已提交",
+                           shape=f"{request.get('width')}x{request.get('height')}"
+                                 f"x{request.get('num_frames')}",
+                           steps=request.get("steps"), preset=request.get("preset"),
+                           seed=request.get("seed"), refs=len(request.get("refs") or []),
+                           dit_onload=request.get("dit_onload"),
+                           lora=(os.path.basename(request["lora"]) if request.get("lora") else None),
+                           out=request.get("out"))
         with self._lock:
             self.jobs[jid] = j
             self.order.append(jid)
@@ -244,8 +263,8 @@ class JobManager:
             self._start(j)
         else:
             j.emit({"type": "queued", "position": len(self._queue)})
-            self.log.info(f"作业 {jid} 已排队（当前并发上限 "
-                          f"{(self.cfg.get('jobs') or {}).get('max_concurrent', 1)}）")
+            self._jlog(j).info("作业已排队", position=len(self._queue),
+                               max_concurrent=(self.cfg.get("jobs") or {}).get("max_concurrent", 1))
         return j
 
     # ---------------------------------------------------------------- 执行
@@ -264,13 +283,16 @@ class JobManager:
         env = dict(os.environ)
         env.update(enrich)
         j.emit({"type": "start", "cmd": j.cmd, "cwd": self.root})
-        self.log.info(f"作业 {j.id} 启动", cmd=" ".join(j.cmd))
+        self._jlog(j).info("作业启动", cmd=" ".join(j.cmd), cwd=self.root,
+                           out=j.request.get("out"), log=j.paths["log"],
+                           events=j.paths["events"])
         try:
             logf = open(j.paths["log"], "ab", buffering=0)
         except OSError as e:
             j.status, j.stage, j.error = "failed", "error", f"无法写日志文件：{e}"
             j.finished = now()
             j.emit({"type": "error", "message": j.error})
+            self._jlog(j).error("无法写作业日志文件", error=str(e), log=j.paths["log"])
             with self._lock:
                 self._running = None
             self._pump_queue()
@@ -284,6 +306,7 @@ class JobManager:
             j.status, j.stage, j.error = "failed", "error", f"启动失败：{e}"
             j.finished = now()
             j.emit({"type": "error", "message": j.error})
+            self._jlog(j).error("作业进程启动失败", error=str(e), cmd=" ".join(j.cmd))
             with self._lock:
                 self._running = None
             self._pump_queue()
@@ -295,6 +318,7 @@ class JobManager:
                 f.write(f"{j.proc.pid}\n")
         except OSError:
             pass
+        self._jlog(j).debug("生成子进程已拉起", pid=j.proc.pid)
         t = threading.Thread(target=self._reader, args=(j, logf), name=f"job-{j.id}", daemon=True)
         j.thread = t
         t.start()
@@ -328,6 +352,7 @@ class JobManager:
                         j.snapshot()
         except Exception as e:  # 读管道失败也要收尾，否则作业永远卡在 running
             j.emit({"type": "warn", "message": f"读取子进程输出失败：{e}"})
+            self._jlog(j).warn("读取子进程输出失败", error=str(e))
         finally:
             try:
                 logf.close()
@@ -342,6 +367,8 @@ class JobManager:
             j.stage = ev.get("stage") or j.stage
             j.emit({"type": "stage", "stage": j.stage,
                     "stage_zh": STAGE_ZH.get(j.stage, j.stage), "info": ev.get("info")})
+            self._jlog(j).info(f"阶段：{STAGE_ZH.get(j.stage, j.stage)}",
+                               stage=j.stage, info=ev.get("info"))
             j.snapshot()
         elif kind == "step":
             j.step = int(ev.get("i") or 0)
@@ -354,11 +381,29 @@ class JobManager:
             keep = (j.step % 2 == 0) or j.step >= j.total_steps
             j.emit({"type": "step", **{k: v for k, v in ev.items() if k != "type"}},
                    persist=keep)
+            # 逐步日志会淹没其它信息：每约 10% 记一条 debug，够看趋势又不刷屏
+            tick = max(1, (j.total_steps or 10) // 10)
+            if j.step % tick == 0 or j.step >= j.total_steps:
+                self._jlog(j).debug("去噪进度", step=j.step, total=j.total_steps,
+                                   s_step=j.step_s, eta_s=j.eta_s,
+                                   peak_vram_gib=j.peak_vram_gib)
             if keep:
                 j.snapshot()
         elif kind == "result":
             j.result = dict(ev)
             j.emit({"type": "result", **{k: v for k, v in ev.items() if k != "type"}})
+            # 产物是「输出日志」的主角：路径、大小、帧数、时长都记全，方便事后对账
+            out = ev.get("out") or j.request.get("out")
+            size_mib = None
+            try:
+                if out and os.path.exists(out):
+                    size_mib = round(os.path.getsize(out) / 1024 ** 2, 2)
+            except OSError:
+                size_mib = None
+            self._jlog(j).info("产物已生成", out=out, size_mib=size_mib,
+                               frames=ev.get("frames"), seconds=ev.get("seconds_out"),
+                               shape=f"{j.request.get('width')}x{j.request.get('height')}"
+                                     f"x{j.request.get('num_frames')}")
         else:
             j.emit(dict(ev))
 
@@ -375,7 +420,16 @@ class JobManager:
         j.emit({"type": "exit", "code": code, "status": j.status, "error": j.error})
         j.snapshot()
         dur = (j.finished - (j.started or j.created)) / 60
-        self.log.info(f"作业 {j.id} {j.status}（退出码 {code}，用时 {dur:.1f} min）")
+        jl = self._jlog(j)
+        out = (j.result or {}).get("out") or j.request.get("out")
+        if j.status == "done":
+            jl.info("作业完成", status=j.status, code=code, duration_min=round(dur, 2),
+                    out=out, peak_vram_gib=j.peak_vram_gib)
+        elif j.status == "cancelled":
+            jl.warn("作业已取消", status=j.status, code=code, duration_min=round(dur, 2))
+        else:
+            jl.error("作业失败", status=j.status, code=code, duration_min=round(dur, 2),
+                     error=j.error, log=j.paths["log"])
         with self._lock:
             if self._running == j.id:
                 self._running = None
@@ -420,6 +474,7 @@ class JobManager:
             j = self.jobs[nxt]
             if j.status == "queued":
                 j.emit({"type": "dequeued"})
+                self._jlog(j).debug("作业出队，开始执行")
                 self._start(j)
 
     # ---------------------------------------------------------------- 控制
@@ -433,6 +488,7 @@ class JobManager:
                     self._queue.remove(jid)
             j.status, j.stage, j.finished = "cancelled", "cancelled", now()
             j.emit({"type": "exit", "code": None, "status": "cancelled"})
+            self._jlog(j).warn("排队中的作业被取消")
             j.snapshot()
             return True, "已从队列中移除"
         if j.status != "running" or not j.proc:
@@ -440,6 +496,7 @@ class JobManager:
         j.status = "cancelling"
         grace = float((self.cfg.get("jobs") or {}).get("cancel_grace_s", 20))
         j.emit({"type": "warn", "message": f"收到取消请求：先发 SIGINT，{grace:.0f}s 后若未退出则 SIGKILL"})
+        self._jlog(j).warn("收到取消请求", grace_s=grace, pid=(j.proc.pid if j.proc else None))
         threading.Thread(target=self._kill_later, args=(j, grace), daemon=True).start()
         try:
             os.killpg(os.getpgid(j.proc.pid), signal.SIGINT)

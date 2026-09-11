@@ -40,7 +40,8 @@ webui/
   backend/
     server.py                  HTTP 路由（REST + SSE）
     jobs.py                    作业排队/执行/进度转发/取消/错误归因
-    promptopt.py               DeepSeek 调用 + 中文回译的标记流解析
+    promptopt.py               DeepSeek 调用 + 中文回译的标记流解析 + LLM 调用记录
+    runlog.py                  运行日志系统（结构化/落盘/订阅）+ LLM 调用记录仓库
     estimate.py                序列长度/耗时/风险预估（复用 scripts/h3_audit.py 的算法）
     telemetry.py               硬件遥测（nvidia-smi + /proc）
     config.py, util.py         配置读取与工具
@@ -50,6 +51,8 @@ webui/
     gen_params.py              从 cache/plan.json + scripts/h3_generate.py 生成参数规格
     param_docs.py              参数中文文档（一句话/详细/经验/风险/取值语义）—— 文案的唯一来源
     mock_deepseek.py           本地假 DeepSeek 服务，用于离线验证优化链路
+    test_logging.py            运行日志 / LLM 记录 / 日志端点的离线自测
+    test_log_render.js         日志行渲染的桩测试（node，不需要浏览器）
     test_docs_render.js        参数文档渲染的桩测试（node，不需要浏览器）
 
 docs/PARAMETERS.md             由 gen_params.py --write-docs 生成的参数参考手册
@@ -166,7 +169,14 @@ conda 环境里本来就有），不引 FastAPI/uvicorn。实测后端常驻内�
 | POST | `/api/paths` | 把 `D:\...` 之类的路径翻成 `/mnt/d/...` 并校验存在性 |
 | GET | `/api/file?path=` | 把 WSL 里的媒体发给浏览器（**仅限仓库目录与模型目录**，越界 403） |
 | GET | `/api/lora` | 扫描 `$H3_MODELS` 里可用的 LoRA |
-| GET | `/api/logs` `/api/logs/stream` | 后端自身日志（环形缓冲）与实时流 |
+| GET | `/api/logs` | 运行日志查询：`level` / `source` / `q` / `n` / `offset` / `since_seq`，返回 `records` + `stats` |
+| GET | `/api/logs/stream` | SSE 运行日志实时流（先 `snapshot` 再 `log`，过滤参数同上） |
+| GET | `/api/logs/download` | 导出当前筛选为 `txt`（默认）或 `json` |
+| POST | `/api/logs/clear` | 清空内存日志；`{"files":true}` 连磁盘文件一起清 |
+| POST | `/api/logs/level` | 运行时切换等级：`{"level":"debug"}` |
+| POST | `/api/logs/client` | 浏览器端上报日志（前端异常等），单次 ≤ 50 条 / 64 KiB |
+| GET | `/api/llm/runs` | LLM 调用记录列表（`limit` / `status` / `q`） |
+| GET | `/api/llm/runs/<id>` | 单次调用的完整记录：请求 / system / user / 输出 / usage / 事件 |
 
 ---
 
@@ -269,7 +279,60 @@ max-long      832x480x243         31040   31040
 
 ---
 
-## 8. 离线自测
+## 8. 运行日志与 LLM 调用记录（调试用）
+
+日志不是「顺便打印几行」，它是排查三类问题的**证据链**：LLM 到底发了什么、回了什么；
+生成作业在哪个阶段失败；产物的路径/大小对不对。所以记录是结构化的，而且落盘。
+
+### 8.1 两条通道
+
+| 通道 | 内容 | 位置 |
+|---|---|---|
+| 内存环形缓冲 | 最近 `logging.capacity` 条（默认 2000） | 页面实时流、过滤查询 |
+| JSONL 文件 | 同样的记录，按大小轮转 | `cache/webui/logs/webui.jsonl`（+`webui.N.jsonl`） |
+
+页面「运行日志」页签提供等级 / 来源 / 关键字过滤、跟随最新、自动换行、下载、清空，
+以及下面说的 LLM 调用记录表。右侧监控面板的小日志窗是同一份数据的 `info+` 视图。
+
+> 服务启动时会把 `webui.jsonl` 尾部读回内存（seq 从历史最大值继续），所以**重启后页面里
+> 仍然能看到上一次运行的日志**，不必去命令行 `tail`。
+
+### 8.2 一条记录长什么样
+
+```json
+{"seq": 12, "t": 1757.0, "iso": "2026-09-11 20:57:25.499", "level": "info",
+ "source": "llm", "event": "llm.request", "msg": "promptopt: 请求 DeepSeek",
+ "run": "20260911-205725-0001", "model": "deepseek-flash", "mode": "base",
+ "system_chars": 4651, "user_chars": 364}
+```
+
+`source`：`llm`（模型调用）/ `job`（生成作业）/ `http`（请求与异常）/
+`server` / `sys` / `ui`（浏览器上报）。
+`event` 是稳定事件名（`llm.start` / `llm.finish` / `llm.error` / `http.request` /
+`job.start` / `server.start` …）：过滤、写告警请按它匹配，别匹配会变的中文文案。
+
+### 8.3 LLM 调用一次一份完整记录
+
+`GET /api/llm/runs/<id>` 返回：请求参数、**system / user 全文**、流式输出
+（英文提示词 / 中文回译 / 结构说明）、思考过程、`usage`、耗时、错误、重试与中断事件。
+文件落在 `cache/webui/logs/llm/<run_id>.json`，只保留最近 `llm_max_runs` 份。
+
+- `llm_capture`：`full`（默认，存全文）/ `summary`（只存长度与 tokens）/ `off`。
+- 页面「优化提示词」完成后，状态行有「查看本次 LLM 调用记录」直达；
+  历史记录在「运行日志 → LLM 调用记录」，可下载 JSON。
+- 客户端中途断开（关页面）会把这次调用标成 `aborted`，而不是假装成功。
+
+### 8.4 配置与等级
+
+见 `config/server.yaml` 的 `logging` 段（等级、容量、目录、轮转、是否暴露 API、
+LLM 记录开关与保留份数）。**等级可以在页面上运行时就改**（`POST /api/logs/level`），
+不用重启服务；想看每个 API 请求的耗时与状态码，把等级调到 `debug`。
+
+> 日志目录在 `cache/webui/` 下，已被 `.gitignore` 忽略 —— 提示词与产物路径不会误进版本库。
+
+---
+
+## 9. 离线自测
 
 ```bash
 # 0) 重新生成参数规格与文档（改了 param_docs.py 或 gen_params.py 之后）
@@ -287,7 +350,11 @@ python3 webui/tools/mock_deepseek.py --port 8799 &
 curl -s -X POST http://127.0.0.1:8765/api/preview -H 'Content-Type: application/json' \
   -d '{"prompt":"测试","width":640,"height":384,"num_frames":22,"steps":4,"preset":"blitz"}'
 
-# 4) 真跑一次最便宜的档（约 1 分钟，含模型装载）
+# 4) 运行日志 / LLM 记录 / 日志端点自测（纯离线；内部起临时服务 + 假 DeepSeek）
+python3 webui/tools/test_logging.py -v
+node webui/tools/test_log_render.js webui/web/assets/app.js   # 日志行渲染（可选）
+
+# 5) 真跑一次最便宜的档（约 1 分钟，含模型装载）
 curl -s -X POST http://127.0.0.1:8765/api/jobs -H 'Content-Type: application/json' \
   -d '{"prompt":"[Shot 1] rain on a window","width":640,"height":384,
        "num_frames":22,"steps":4,"preset":"blitz"}'

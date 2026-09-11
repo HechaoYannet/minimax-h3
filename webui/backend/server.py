@@ -8,8 +8,14 @@
   GET  /api/config                  参数规格 + 预设 + 服务配置（不含 API Key）
   GET  /api/telemetry               当前硬件占用 + 最近曲线
   GET  /api/lora                    可用的 LoRA 文件
-  GET  /api/logs                    后端自身日志（环形缓冲）
-  GET  /api/logs/stream             SSE：后端日志实时流
+  GET  /api/logs                    运行日志查询（level/source/q/分页 + 统计）
+  GET  /api/logs/stream             SSE：运行日志实时流（支持同样的过滤）
+  GET  /api/logs/download           导出当前筛选的日志（txt / json）
+  POST /api/logs/clear              清空内存缓冲（files=true 连磁盘文件一起清）
+  POST /api/logs/level              运行时切换日志等级（debug/info/warn/error）
+  POST /api/logs/client             浏览器端日志上报（前端异常、关键动作）
+  GET  /api/llm/runs                LLM 调用记录列表（每次「优化提示词」一条）
+  GET  /api/llm/runs/<id>           单次 LLM 调用的完整记录（请求/输出/usage/报错）
   GET  /api/jobs                    作业列表
   POST /api/jobs                    提交生成作业
   GET  /api/jobs/<id>               单个作业
@@ -36,8 +42,10 @@ from . import config as cfgmod
 from .estimate import estimate, normalise_shape, risks
 from .jobs import JobManager, build_command, make_request
 from .promptopt import Optimizer
+from .runlog import LEVEL_ORDER, LLMRunStore, RunLog
 from .telemetry import Telemetry
-from .util import Log, human_dur, iso, now, read_json, repo_root, tail_lines, wsl_to_windows, write_json
+from .util import (human_dur, iso, now, read_json, repo_root, tail_lines, wsl_to_windows,
+                   write_json)
 
 STATIC_TYPES = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -48,19 +56,51 @@ STATIC_TYPES = {
 }
 
 
+def _q1(q: dict, key: str, default=None):
+    """取 querystring 的第一个值（parse_qs 的值永远是列表）。"""
+    v = q.get(key)
+    if not v:
+        return default
+    return v[0]
+
+
+def _qint(q: dict, key: str, default: int = 0) -> int:
+    try:
+        return int(_q1(q, key, default))
+    except (TypeError, ValueError):
+        return default
+
+
 class App:
     """进程级共享状态。"""
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.root = cfg["root"]
-        self.log = Log(capacity=800)
+        # ---- 运行日志：内存环形缓冲 + JSONL 落盘；LLM 调用另存完整证据 -------
+        logcfg = cfg.get("logging") or {}
+        self.log = RunLog(
+            logcfg.get("dir") or os.path.join(self.root, "cache", "webui", "logs"),
+            level=logcfg.get("level", "info"),
+            capacity=logcfg.get("capacity", 2000),
+            file_enabled=logcfg.get("file_enabled", True),
+            max_file_mb=logcfg.get("max_file_mb", 8),
+            backups=logcfg.get("backups", 5),
+            console=logcfg.get("console", True),
+            max_field_chars=logcfg.get("max_field_chars", 4000))
+        self.log_expose = bool(logcfg.get("expose", True))
+        self.llm_runs = LLMRunStore(
+            os.path.join(self.log.dir, "llm"), self.log,
+            enabled=logcfg.get("llm_enabled", True),
+            capture=logcfg.get("llm_capture", "full"),
+            max_runs=logcfg.get("llm_max_runs", 100),
+            max_chars=logcfg.get("llm_max_chars", 200000))
         self.telemetry = Telemetry(
             nvidia_smi=(cfg.get("telemetry") or {}).get("nvidia_smi", "nvidia-smi"),
             interval=(cfg.get("defaults") or {}).get("telemetry_interval_s", 1.5),
             repo_root=self.root)
         self.jobs = JobManager(cfg, self.log)
-        self.optimizer = Optimizer(self.log)
+        self.optimizer = Optimizer(self.log, self.llm_runs)
         self.web_dir = os.path.join(self.root, "webui", "web")
         self.started = now()
         self._probe_cache: dict[str, dict] = {}
@@ -154,9 +194,37 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     # ---- 基础输出
-    def log_message(self, fmt, *args):  # 默认会往 stderr 刷，这里降噪
-        if APP and self.path.startswith("/api/"):
-            APP.log.debug(f"{self.address_string()} {fmt % args}")
+    def log_message(self, fmt, *args):  # 默认会往 stderr 刷；请求日志统一在 _route 里记
+        pass
+
+    def log_error(self, fmt, *args):
+        if APP:
+            APP.log.debug(f"HTTP: {fmt % args}", source="http", event="http.error",
+                          ip=self.address_string())
+
+    def send_response(self, code, message=None):
+        # 记下状态码，_route 结束时连同耗时写一条请求日志
+        self._status = int(code)
+        super().send_response(code, message)
+
+    def _log_request(self, method: str, path: str, q: dict, dur: float):
+        app = APP
+        if app is None or not getattr(app, "log_expose", True):
+            return
+        status = getattr(self, "_status", 0)
+        if path == "/api/telemetry" and status < 400:
+            return  # 前端 1.5s 轮询一次，记下来只会淹没别的信息
+        fields = {"method": method, "path": path, "status": status,
+                  "dur_ms": int(dur * 1000), "ip": self.address_string()}
+        query = {k: (v[0] if v else "") for k, v in (q or {}).items()}
+        if query:
+            fields["query"] = query
+        if status >= 500:
+            app.log.error("请求失败", source="http", event="http.request", **fields)
+        elif status >= 400:
+            app.log.warn("请求被拒绝", source="http", event="http.request", **fields)
+        elif not getattr(self, "_err_logged", False):
+            app.log.debug("请求完成", source="http", event="http.request", **fields)
 
     def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None):
         self.send_response(code)
@@ -185,6 +253,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
+        # SSE 是「一次请求一次响应」：没有 Content-Length，必须让 handler 返回时关连接，
+        # 否则 HTTP/1.1 keep-alive 会让客户端一直等 body 结束（/api/optimize 曾因此挂到超时）。
+        self.close_connection = True
 
     def sse(self, event: str, data) -> bool:
         """返回 False 表示客户端已断开。"""
@@ -234,6 +305,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         q = parse_qs(parsed.query)
+        self._status = 0
+        self._err_logged = False
+        t0 = time.time()
         try:
             if path.startswith("/api/"):
                 self._api(method, path, q)
@@ -243,16 +317,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.err(405, "不支持的方法")
         except ValueError as e:
             tb = traceback.format_exc()
+            self._err_logged = True
             if APP:
-                APP.log.warn(f"{method} {path} 参数错误：{e}", trace=tb[-1500:])
+                APP.log.warn(f"{method} {path} 参数错误：{e}", source="http",
+                             event="http.bad_request", trace=tb[-1500:])
             print(f"[api] {method} {path} bad request:\n{tb}", flush=True)
             self.err(400, str(e), trace=tb.strip().splitlines()[-8:])
         except Exception as e:
             tb = traceback.format_exc()
+            self._err_logged = True
             if APP:
-                APP.log.error(f"{method} {path} 失败：{e}", trace=tb[-1500:])
+                APP.log.error(f"{method} {path} 失败：{e}", source="http",
+                              event="http.exception", trace=tb[-1500:])
             print(f"[api] {method} {path} failed:\n{tb}", flush=True)
             self.err(500, f"服务端错误：{e}", trace=tb.strip().splitlines()[-6:])
+        finally:
+            self._log_request(method, path, q, time.time() - t0)
 
     # ---- 静态资源
     def _static(self, path: str):
@@ -290,9 +370,21 @@ class Handler(BaseHTTPRequestHandler):
         if seg == ["api", "lora"] and method == "GET":
             return self.api_lora()
         if seg == ["api", "logs"] and method == "GET":
-            return self.json({"ok": True, "lines": app.log.tail(int(q.get("n", ["200"])[0]))})
+            return self.api_logs(q)
         if seg == ["api", "logs", "stream"] and method == "GET":
-            return self.stream_logs()
+            return self.stream_logs(q)
+        if seg == ["api", "logs", "download"] and method == "GET":
+            return self.api_logs_download(q)
+        if seg == ["api", "logs", "clear"] and method == "POST":
+            return self.api_logs_clear()
+        if seg == ["api", "logs", "level"] and method == "POST":
+            return self.api_logs_level()
+        if seg == ["api", "logs", "client"] and method == "POST":
+            return self.api_logs_client()
+        if seg == ["api", "llm", "runs"] and method == "GET":
+            return self.api_llm_runs(q)
+        if len(seg) == 4 and seg[:3] == ["api", "llm", "runs"] and method == "GET":
+            return self.api_llm_run(seg[3])
         if seg == ["api", "estimate"] and method == "POST":
             return self.api_estimate()
         if seg == ["api", "preview"] and method == "POST":
@@ -363,11 +455,19 @@ class Handler(BaseHTTPRequestHandler):
         gpu = app.telemetry.current().get("gpu") or {}
         checks.append({"name": "nvidia-smi", "ok": bool(gpu.get("ok")),
                        "detail": gpu.get("name") or gpu.get("error")})
+        lstats = app.log.stats()
+        checks.append({"name": "运行日志（落盘）",
+                       "ok": not (app.log.file_enabled and lstats.get("file_error")),
+                       "detail": (f"{lstats['level']} · {lstats['retained']}/{lstats['capacity']} 条"
+                                  f" · {app.log.dir}"
+                                  + (f" · 写盘错误：{lstats['file_error']}" if lstats.get("file_error")
+                                     else ""))})
         return self.json({"ok": True, "checks": checks, "root": root,
                           "uptime_s": round(now() - app.started, 1),
                           "python": os.sys.version.split()[0],
                           "host": os.uname().nodename if hasattr(os, "uname") else "?",
-                          "repo_windows": wsl_to_windows(root)})
+                          "repo_windows": wsl_to_windows(root),
+                          "logging": lstats, "llm": app.llm_runs.stats()})
 
     def api_file(self, q):
         """把 WSL 里的媒体文件发给浏览器（前端预览产物/参考图用）。
@@ -426,6 +526,18 @@ class Handler(BaseHTTPRequestHandler):
                 "expose_server_log": (cfg.get("telemetry") or {}).get("expose_server_log", True),
                 "max_concurrent": (cfg.get("jobs") or {}).get("max_concurrent", 1),
             },
+            # 运行日志与 LLM 记录：页面据此决定显示哪些面板/默认筛选
+            "logging": {
+                "level": app.log.level,
+                "expose": app.log_expose,
+                "dir": app.log.dir,
+                "capacity": app.log.capacity,
+                "file_enabled": app.log.file_enabled,
+                "llm_enabled": app.llm_runs.enabled,
+                "llm_capture": app.llm_runs.capture,
+                "llm_max_runs": app.llm_runs.max_runs,
+                "levels": LEVEL_ORDER,
+            },
             "deepseek": {
                 "url": (ds.get("api") or {}).get("url"),
                 "model": model.get("name"),
@@ -451,6 +563,120 @@ class Handler(BaseHTTPRequestHandler):
                           "history": app.telemetry.history_list(n),
                           "interval_s": app.telemetry.interval,
                           "server_time": iso()})
+
+    # ---- 运行日志 -----------------------------------------------------
+    def _log_exposed(self) -> bool:
+        app = APP
+        return bool(app and getattr(app, "log_expose", True))
+
+    def api_logs(self, q):
+        """运行日志查询：支持 level / source / q / since_seq / n / offset 过滤。
+
+        records 是结构化记录；lines 与 records 等价，保留给老脚本。
+        """
+        app = APP
+        assert app is not None
+        if not self._log_exposed():
+            return self.err(403, "运行日志未对外暴露（config/server.yaml: logging.expose=false）")
+        res = app.log.query(n=_qint(q, "n", 300), offset=_qint(q, "offset", 0),
+                            level=_q1(q, "level"), source=_q1(q, "source"),
+                            q=_q1(q, "q"), since_seq=_qint(q, "since_seq", 0))
+        res.update({"ok": True, "stats": app.log.stats(), "llm": app.llm_runs.stats(),
+                    "level": app.log.level, "levels": LEVEL_ORDER})
+        res["lines"] = res["records"]
+        return self.json(res)
+
+    def api_logs_download(self, q):
+        """把当前筛选下的日志导出成 txt / json，方便贴给别人或存档。"""
+        app = APP
+        assert app is not None
+        if not self._log_exposed():
+            return self.err(403, "运行日志未对外暴露")
+        recs = app.log.tail(_qint(q, "n", 2000), level=_q1(q, "level"),
+                            source=_q1(q, "source"), q=_q1(q, "q"))
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        if (_q1(q, "format", "txt") or "txt").lower() == "json":
+            body = json.dumps({"generated": iso(), "stats": app.log.stats(),
+                               "records": recs}, ensure_ascii=False, indent=2).encode("utf-8")
+            name, ctype = f"webui-log-{stamp}.json", "application/json; charset=utf-8"
+        else:
+            header = ("# MiniMax-H3 webui 运行日志导出\n"
+                      f"# 生成时间 {iso()}  条数 {len(recs)}  "
+                      f"level={_q1(q, 'level') or 'all'} source={_q1(q, 'source') or 'all'} "
+                      f"q={_q1(q, 'q') or '-'}\n")
+            body = (header + app.log.format_text(recs)).encode("utf-8")
+            name, ctype = f"webui-log-{stamp}.txt", "text/plain; charset=utf-8"
+        self._send(200, body, ctype, {"Content-Disposition": f'attachment; filename="{name}"'})
+
+    def api_logs_clear(self):
+        app = APP
+        assert app is not None
+        if not self._log_exposed():
+            return self.err(403, "运行日志未对外暴露")
+        body = self.json_body()
+        res = app.log.clear(files=bool(body.get("files")))
+        return self.json({"ok": True, **res, "stats": app.log.stats()})
+
+    def api_logs_level(self):
+        """运行时切换日志等级（页面「日志」页签的下拉框就是它的入口）。"""
+        app = APP
+        assert app is not None
+        body = self.json_body()
+        level = str(body.get("level") or "").lower()
+        if level not in LEVEL_ORDER:
+            return self.err(400, f"level 必须是 {'/'.join(LEVEL_ORDER)} 之一")
+        app.log.set_level(level)
+        return self.json({"ok": True, "level": app.log.level, "stats": app.log.stats()})
+
+    def api_logs_client(self):
+        """浏览器端上报：前端异常 / 关键动作写进同一份运行日志。
+
+        用 sendBeacon 时 Content-Type 可能是 text/plain，所以这里不看头，直接解析 body。
+        单次限制 50 条、64 KiB，避免前端异常风暴把日志文件冲爆。
+        """
+        app = APP
+        assert app is not None
+        if not self._log_exposed():
+            return self.err(403, "运行日志未对外暴露")
+        raw = self.body()
+        if len(raw) > 64 * 1024:
+            return self.err(413, "上报内容超过 64 KiB")
+        if not raw:
+            return self.err(400, "空的上报内容")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception as e:
+            return self.err(400, f"上报内容不是合法 JSON：{e}")
+        items = data if isinstance(data, list) else [data]
+        accepted = 0
+        for it in items[:50]:
+            if not isinstance(it, dict):
+                continue
+            it = dict(it)
+            it.setdefault("source", "ui")
+            if app.log.ingest(it):
+                accepted += 1
+        return self.json({"ok": True, "accepted": accepted})
+
+    # ---- LLM 调用记录 -------------------------------------------------
+    def api_llm_runs(self, q):
+        app = APP
+        assert app is not None
+        if not self._log_exposed():
+            return self.err(403, "运行日志未对外暴露")
+        runs = app.llm_runs.list_runs(limit=_qint(q, "limit", 50),
+                                      status=_q1(q, "status"), q=_q1(q, "q"))
+        return self.json({"ok": True, "runs": runs, "stats": app.llm_runs.stats()})
+
+    def api_llm_run(self, run_id: str):
+        app = APP
+        assert app is not None
+        if not self._log_exposed():
+            return self.err(403, "运行日志未对外暴露")
+        run = app.llm_runs.get(run_id)
+        if not run:
+            return self.err(404, "没有这条调用记录（可能已被 llm_max_runs 清理）")
+        return self.json({"ok": True, "run": run})
 
     def api_lora(self):
         app = APP
@@ -673,26 +899,39 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             j.unsubscribe(q)
 
-    def stream_logs(self):
+    def stream_logs(self, q=None):
         app = APP
         assert app is not None
+        q = q or {}
+        if not self._log_exposed():
+            self.sse_start()
+            self.sse("error", {"type": "error", "message": "运行日志未对外暴露"})
+            return
+        level, source = _q1(q, "level"), _q1(q, "source")
+        search, since = _q1(q, "q"), _qint(q, "since_seq", 0)
         self.sse_start()
-        q = app.log.subscribe()
+        self.sse("snapshot", {"stats": app.log.stats(), "llm": app.llm_runs.stats(),
+                              "level": app.log.level})
+        qq = app.log.subscribe()
         try:
-            for rec in app.log.tail(100):
+            # 先补最近的历史（同样走筛选），再转实时
+            for rec in app.log.tail(200, level=level, source=source, q=search, since_seq=since):
                 if not self.sse("log", rec):
                     return
             while True:
                 try:
-                    rec = q.get(timeout=15)
+                    rec = qq.get(timeout=15)
                 except Exception:
                     if not self.sse_ping():
                         return
                     continue
+                if not app.log.matches(rec, level=level, source=source, q=search,
+                                       since_seq=since):
+                    continue
                 if not self.sse("log", rec):
                     return
         finally:
-            app.log.unsubscribe(q)
+            app.log.unsubscribe(qq)
 
 
 # --------------------------------------------------------------------------- 路径翻译
@@ -721,7 +960,10 @@ def create(cfg: dict | None = None) -> tuple[App, ThreadingHTTPServer]:
     global APP
     cfg = cfg or cfgmod.server_config()
     APP = App(cfg)
-    APP.log.info("服务启动", root=cfg["root"], python=os.sys.version.split()[0])
+    APP.log.info("服务启动", source="sys", event="server.start",
+                 root=cfg["root"], python=os.sys.version.split()[0],
+                 log_dir=APP.log.dir, log_level=APP.log.level,
+                 llm_capture=APP.llm_runs.capture)
     APP.telemetry.start()
     host = (cfg.get("server") or {}).get("host", "0.0.0.0")
     port = int((cfg.get("server") or {}).get("port", 8765))
@@ -762,6 +1004,7 @@ def main(argv=None) -> int:
     print(f"[webui] 仓库根：{cfg['root']}（Windows: {wsl_to_windows(cfg['root'])}）")
     print(f"[webui] 参数规格：{len(app.spec().get('params') or [])} 项；"
           f"DeepSeek Key：{'已配置' if app.deepseek_cfg()['api']['key_present'] else '未配置'}")
+    print(f"[webui] 运行日志：{app.log.dir}（{app.log.level}，页面「日志」页签可实时查看）")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -769,6 +1012,8 @@ def main(argv=None) -> int:
     finally:
         app.telemetry.stop()
         httpd.server_close()
+        app.log.info("服务停止", source="sys", event="server.stop")
+        app.log.close()
     return 0
 
 

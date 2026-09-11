@@ -46,6 +46,14 @@ SERVER_FALLBACK = {
                  "dit_onload": "cpu", "sdpa_backend": "cudnn", "lora": "",
                  "lora_enabled": False, "telemetry_interval_s": 1.5},
     "telemetry": {"nvidia_smi": "nvidia-smi", "expose_server_log": True},
+    "logging": {
+        "level": "info", "capacity": 2000, "console": True,
+        "file_enabled": True, "dir": "cache/webui/logs",
+        "max_file_mb": 8, "backups": 5, "max_field_chars": 4000,
+        "expose": True,
+        "llm_enabled": True, "llm_capture": "full",
+        "llm_max_runs": 100, "llm_max_chars": 200000,
+    },
 }
 
 
@@ -124,6 +132,10 @@ def server_config() -> dict:
     paths = cfg["paths"] = dict(cfg.get("paths", {}))
     for k in ("cache_dir", "outputs_dir", "jobs_dir", "uploads_dir"):
         paths[k] = os.path.abspath(os.path.join(ROOT, paths.get(k) or SERVER_FALLBACK["paths"][k]))
+    # 运行日志目录：同样支持相对仓库根的写法（默认 cache/webui/logs）
+    logcfg = cfg["logging"] = dict(cfg.get("logging", {}))
+    d = logcfg.get("dir") or SERVER_FALLBACK["logging"]["dir"]
+    logcfg["dir"] = d if os.path.isabs(d) else os.path.abspath(os.path.join(ROOT, d))
     cfg["root"] = ROOT
     return cfg
 
