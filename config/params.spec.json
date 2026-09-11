@@ -1,0 +1,707 @@
+{
+  "generated_by": "webui/tools/gen_params.py",
+  "source": {
+    "plan": "cache/plan.json",
+    "cli": "scripts/h3_generate.py"
+  },
+  "presets": {
+    "blitz": {
+      "height": 384,
+      "width": 640,
+      "num_frames": 22,
+      "steps": 8,
+      "seconds": 0.92,
+      "seq_len": 2944,
+      "step_s": 2.91,
+      "denoise_min": 0.4,
+      "ref_image_short_edge": 256,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048,
+      "note": "blitz"
+    },
+    "fast": {
+      "height": 384,
+      "width": 640,
+      "num_frames": 39,
+      "steps": 10,
+      "seconds": 1.62,
+      "seq_len": 4224,
+      "step_s": 4.35,
+      "denoise_min": 0.7,
+      "ref_image_short_edge": 256,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048,
+      "note": "fast"
+    },
+    "draft": {
+      "height": 384,
+      "width": 640,
+      "num_frames": 73,
+      "steps": 20,
+      "seconds": 3.04,
+      "seq_len": 7232,
+      "step_s": 8.1,
+      "denoise_min": 2.7,
+      "ref_image_short_edge": 768,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048,
+      "note": "draft"
+    },
+    "preview": {
+      "height": 480,
+      "width": 832,
+      "num_frames": 73,
+      "steps": 30,
+      "seconds": 3.04,
+      "seq_len": 11008,
+      "step_s": 13.59,
+      "denoise_min": 6.8,
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048,
+      "note": "preview"
+    },
+    "standard": {
+      "height": 480,
+      "width": 832,
+      "num_frames": 124,
+      "steps": 30,
+      "seconds": 5.17,
+      "seq_len": 17024,
+      "step_s": 24.13,
+      "denoise_min": 12.1,
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 512,
+      "ref_video_max_pixels": 344064,
+      "note": "standard"
+    },
+    "quality": {
+      "height": 576,
+      "width": 1024,
+      "num_frames": 124,
+      "steps": 40,
+      "seconds": 5.17,
+      "seq_len": 23872,
+      "step_s": 38.8,
+      "denoise_min": 25.9,
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 512,
+      "ref_video_max_pixels": 344064,
+      "note": "quality"
+    },
+    "text-only": {
+      "height": 480,
+      "width": 832,
+      "num_frames": 124,
+      "steps": 30,
+      "seconds": 5.17,
+      "seq_len": 16000,
+      "step_s": 22.18,
+      "denoise_min": 11.1,
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048,
+      "note": "text-only"
+    },
+    "video-edit": {
+      "height": 480,
+      "width": 832,
+      "num_frames": 124,
+      "steps": 30,
+      "seconds": 5.17,
+      "seq_len": 25728,
+      "step_s": 43.26,
+      "denoise_min": 21.6,
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 384,
+      "ref_video_max_pixels": 258048,
+      "note": "video-edit"
+    },
+    "max-native": {
+      "height": 768,
+      "width": 1344,
+      "num_frames": 124,
+      "steps": 50,
+      "seconds": 5.17,
+      "seq_len": 39872,
+      "step_s": 84.17,
+      "denoise_min": 70.1,
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 512,
+      "ref_video_max_pixels": 344064,
+      "note": "max-native"
+    },
+    "max-long": {
+      "height": 480,
+      "width": 832,
+      "num_frames": 243,
+      "steps": 40,
+      "seconds": 10.12,
+      "seq_len": 31040,
+      "step_s": 57.2,
+      "denoise_min": 38.1,
+      "ref_image_short_edge": 1024,
+      "ref_video_short_edge": 512,
+      "ref_video_max_pixels": 344064,
+      "note": "max-long"
+    }
+  },
+  "default_preset": "standard",
+  "params": [
+    {
+      "id": "preset",
+      "group": "shape",
+      "group_title": "形状与时长",
+      "label": "预设档位",
+      "unit": "group",
+      "help": "从 cache/plan.json 读出的调优预设，一档对应一组已验证的形状与步数。",
+      "type": "str",
+      "choices": null,
+      "cli": [
+        "--preset"
+      ]
+    },
+    {
+      "id": "width",
+      "group": "shape",
+      "group_title": "形状与时长",
+      "label": "宽度",
+      "unit": "px",
+      "help": "必须是 32 的倍数，框架会向上吸附并在日志里记录。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--width"
+      ],
+      "default": {
+        "__preset__": "width"
+      },
+      "min": 160,
+      "max": 1920,
+      "step": 32
+    },
+    {
+      "id": "height",
+      "group": "shape",
+      "group_title": "形状与时长",
+      "label": "高度",
+      "unit": "px",
+      "help": "必须是 32 的倍数。8 GiB 卡上 1024x576 是实测跑通的最高点。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--height"
+      ],
+      "default": {
+        "__preset__": "height"
+      },
+      "min": 160,
+      "max": 1920,
+      "step": 32
+    },
+    {
+      "id": "num_frames",
+      "group": "shape",
+      "group_title": "形状与时长",
+      "label": "帧数",
+      "unit": "帧",
+      "help": "必须满足 num_frames % 17 == 5；24 fps，帧数/24 = 秒数。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--num-frames"
+      ],
+      "default": {
+        "__preset__": "num_frames"
+      },
+      "min": 5,
+      "max": 400,
+      "step": 1
+    },
+    {
+      "id": "seconds",
+      "group": "shape",
+      "group_title": "形状与时长",
+      "label": "时长",
+      "unit": "秒",
+      "help": "由帧数换算：帧数 / 24。改帧数时自动联动。",
+      "type": "str",
+      "choices": null,
+      "cli": [],
+      "computed_from": "num_frames",
+      "fps": 24
+    },
+    {
+      "id": "steps",
+      "group": "shape",
+      "group_title": "形状与时长",
+      "label": "采样步数",
+      "unit": "步",
+      "help": "去噪步数。步数×单步耗时≈去噪总时长；挂 LoRA 时建议 ≥30。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--steps"
+      ],
+      "default": {
+        "__preset__": "steps"
+      },
+      "min": 1,
+      "max": 80,
+      "step": 1
+    },
+    {
+      "id": "seed",
+      "group": "shape",
+      "group_title": "形状与时长",
+      "label": "随机种子",
+      "unit": "seed",
+      "help": "同种子+同参数=同结果；换种子可快速试构图。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--seed"
+      ],
+      "default": 42,
+      "min": 0,
+      "max": 2147483647,
+      "step": 1
+    },
+    {
+      "id": "ref_image_short_edge",
+      "group": "refs",
+      "group_title": "参考条件代价",
+      "label": "参考图短边",
+      "unit": "px",
+      "help": "最陡的性能杠杆：2048→1536→1024→768→512 逐级降价，同时降低细节保留。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--ref-image-short-edge"
+      ],
+      "default": {
+        "__preset__": "ref_image_short_edge",
+        "fallback": 1024
+      },
+      "min": 256,
+      "max": 2048,
+      "step": 64
+    },
+    {
+      "id": "ref_video_short_edge",
+      "group": "refs",
+      "group_title": "参考条件代价",
+      "label": "参考视频短边",
+      "unit": "px",
+      "help": "参考视频与目标等长，代价极大；draft 档默认 384。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--ref-video-short-edge"
+      ],
+      "default": {
+        "__preset__": "ref_video_short_edge",
+        "fallback": 384
+      },
+      "min": 256,
+      "max": 1024,
+      "step": 64
+    },
+    {
+      "id": "ref_video_max_pixels",
+      "group": "refs",
+      "group_title": "参考条件代价",
+      "label": "参考视频像素上限",
+      "unit": "px",
+      "help": "与短边共同约束参考视频的读取尺寸。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--ref-video-max-pixels"
+      ],
+      "default": {
+        "__preset__": "ref_video_max_pixels"
+      },
+      "min": 65536,
+      "max": 2000000,
+      "step": 1024
+    },
+    {
+      "id": "vram_limit",
+      "group": "memory",
+      "group_title": "显存 / 内存 / 速度",
+      "label": "显存阈值",
+      "unit": "GiB",
+      "help": "「整卡已用量」阈值，不是权重预算。抬高只多常驻几层，实测提速有限。",
+      "type": "float",
+      "choices": null,
+      "cli": [
+        "--vram-limit"
+      ],
+      "default": 4.58,
+      "min": 2.0,
+      "max": 7.5,
+      "step": 0.01
+    },
+    {
+      "id": "activation_reserve",
+      "group": "memory",
+      "group_title": "显存 / 内存 / 速度",
+      "label": "激活预留",
+      "unit": "GiB",
+      "help": "按 vram_limit = 启动可用 − 激活预留 − LoRA 反推。想冒险时调它。",
+      "type": "float",
+      "choices": null,
+      "cli": [
+        "--activation-reserve"
+      ],
+      "min": 0.5,
+      "max": 6.0,
+      "step": 0.05
+    },
+    {
+      "id": "dit_onload",
+      "group": "memory",
+      "group_title": "显存 / 内存 / 速度",
+      "label": "DiT 装载方式",
+      "unit": null,
+      "help": "cpu=常驻内存(峰值 11.1 GiB)；disk=走 mmap(峰值 4.8 GiB)，长片段更稳。",
+      "type": "str",
+      "choices": [
+        "cpu",
+        "disk"
+      ],
+      "cli": [
+        "--dit-onload"
+      ]
+    },
+    {
+      "id": "sdpa_backend",
+      "group": "memory",
+      "group_title": "显存 / 内存 / 速度",
+      "label": "注意力后端",
+      "unit": null,
+      "help": "DiT 走 SDPA；实测 cuDNN 最快。其余路径固定 flash。",
+      "type": "str",
+      "choices": [
+        "cudnn",
+        "flash",
+        "efficient",
+        "auto"
+      ],
+      "cli": [
+        "--sdpa-backend"
+      ]
+    },
+    {
+      "id": "tile_size",
+      "group": "vae",
+      "group_title": "VAE 解码",
+      "label": "VAE 解码分块",
+      "unit": "px",
+      "help": "分块解码，避免整帧物化导致显存尖峰。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--tile-size"
+      ],
+      "default": 256,
+      "min": 128,
+      "max": 1024,
+      "step": 64
+    },
+    {
+      "id": "tile_overlap",
+      "group": "vae",
+      "group_title": "VAE 解码",
+      "label": "VAE 分块重叠",
+      "unit": "px",
+      "help": "分块之间的重叠像素，减少接缝。",
+      "type": "int",
+      "choices": null,
+      "cli": [
+        "--tile-overlap"
+      ],
+      "default": 64,
+      "min": 0,
+      "max": 256,
+      "step": 16
+    },
+    {
+      "id": "no_tiled",
+      "group": "vae",
+      "group_title": "VAE 解码",
+      "label": "不分块解码",
+      "unit": null,
+      "help": "一次性解码整段 VAE，显存需求高得多，仅在显存充裕时使用。",
+      "type": "bool",
+      "choices": null,
+      "cli": [
+        "--no-tiled"
+      ]
+    },
+    {
+      "id": "lora",
+      "group": "lora",
+      "group_title": "LoRA",
+      "label": "LoRA 文件",
+      "unit": null,
+      "help": "挂 LoRA 会自动切到 beta 调度器（euler+beta 是 AfterMidnight 的硬性要求）。",
+      "type": "str",
+      "choices": null,
+      "cli": [
+        "--lora"
+      ]
+    },
+    {
+      "id": "lora_alpha",
+      "group": "lora",
+      "group_title": "LoRA",
+      "label": "LoRA 权重",
+      "unit": "α",
+      "help": "LoRA 强度倍率。1.0 为作者标定值。",
+      "type": "float",
+      "choices": null,
+      "cli": [
+        "--lora-alpha"
+      ],
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.05
+    },
+    {
+      "id": "scheduler",
+      "group": "scheduler",
+      "group_title": "调度器 / 采样器",
+      "label": "调度器",
+      "unit": null,
+      "help": "auto=挂 LoRA 用 beta、否则 flow；beta 在低 sigma 段更密，音频更稳。",
+      "type": "str",
+      "choices": [
+        "auto",
+        "flow",
+        "beta"
+      ],
+      "cli": [
+        "--scheduler"
+      ]
+    },
+    {
+      "id": "beta_alpha",
+      "group": "scheduler",
+      "group_title": "调度器 / 采样器",
+      "label": "beta α",
+      "unit": null,
+      "help": "ComfyUI beta 分位数参数，默认 0.6。",
+      "type": "float",
+      "choices": null,
+      "cli": [
+        "--beta-alpha"
+      ],
+      "min": 0.1,
+      "max": 3.0,
+      "step": 0.05
+    },
+    {
+      "id": "beta_beta",
+      "group": "scheduler",
+      "group_title": "调度器 / 采样器",
+      "label": "beta β",
+      "unit": null,
+      "help": "ComfyUI beta 分位数参数，默认 0.6。",
+      "type": "float",
+      "choices": null,
+      "cli": [
+        "--beta-beta"
+      ],
+      "min": 0.1,
+      "max": 3.0,
+      "step": 0.05
+    },
+    {
+      "id": "text_cache",
+      "group": "cache",
+      "group_title": "提示词缓存",
+      "label": "复用提示词缓存",
+      "unit": null,
+      "help": "命中缓存可完全跳过 26 B 参数的文本编码器。",
+      "type": "bool",
+      "choices": null,
+      "cli": [
+        "--text-cache"
+      ]
+    },
+    {
+      "id": "refresh_text_cache",
+      "group": "cache",
+      "group_title": "提示词缓存",
+      "label": "强制重算缓存",
+      "unit": null,
+      "help": "忽略已有缓存重新编码提示词。",
+      "type": "bool",
+      "choices": null,
+      "cli": [
+        "--refresh-text-cache"
+      ]
+    }
+  ],
+  "shape": {
+    "fps": 24,
+    "frame_mod": {
+      "mod": 17,
+      "rem": 5,
+      "note": "num_frames % 17 == 5"
+    },
+    "frames_min_measured": 22,
+    "frames_max_measured": 243,
+    "frames_note": "低于 22 帧 VAE 解码会失败；243 帧是 640x384 档实测跑通的最长片段",
+    "size_mod": {
+      "mod": 32,
+      "note": "width/height % 32 == 0"
+    },
+    "vram_total_gib": 7.93,
+    "startup_free_gib": 6.84,
+    "ram_total_gib": 22.91
+  },
+  "model": {
+    "resolved": {
+      "vram_limit_gib": 4.58,
+      "denoise": {
+        "steps": 30,
+        "flow_shift": 12.0,
+        "audio_flow_shift": 3.0
+      },
+      "vae": {
+        "tiled": true,
+        "tile_size": 256,
+        "tile_overlap": 64
+      },
+      "attention": {
+        "implementation": "torch",
+        "force_sdpa_backend": "cudnn",
+        "reason": "cuDNN SDPA measured fastest (47.2 TFLOP/s); flash_attn / sageattention / xformers are not installed"
+      },
+      "scheduler": {
+        "default": "auto",
+        "auto_rule": "beta when a LoRA is attached, flow otherwise",
+        "beta": {
+          "alpha": 0.6,
+          "beta": 0.6,
+          "source": "comfy/samplers.py beta_scheduler, indexed into ModelSamplingDiscreteFlow.sigmas"
+        },
+        "why": "the AfterMidnight Ref2VA LoRA requires 'euler sampler + beta scheduler' or the audio degrades. At 30 steps / shift 12 the final grid sigma is 0.2927 with flow vs 0.0780 with beta, i.e. beta spends far more of the trajectory at low sigma where audio detail is resolved.",
+        "module": "scripts/h3_scheduler.py"
+      },
+      "guidance": {
+        "cfg_scale": 1.0,
+        "reason": "cfg_scale=1.0 skips the negative pass entirely -> halves per-step cost. Use the text-side levers instead of CFG."
+      }
+    },
+    "memory": {
+      "vram_limit_gib": 4.58,
+      "dit_resident_gib": 3.48,
+      "dit_streamed_per_step_gib": 6.28,
+      "stream_cost_s_per_step": 1.12
+    }
+  },
+  "timing_fit": {
+    "a": 0.0001296668321007613,
+    "b": 0.0009004559042315374,
+    "c": 3.036010750240507e-08,
+    "n_points": 10,
+    "seq_range": [
+      2944,
+      39872
+    ]
+  },
+  "measured": [
+    {
+      "label": "blitz 640x384x22/8",
+      "seq": 2944,
+      "step_s": 5.58,
+      "total_s": 52.2,
+      "peak_gib": 3.3
+    },
+    {
+      "label": "fast 640x384x39/8",
+      "seq": 4224,
+      "step_s": 8.22,
+      "total_s": 75.5,
+      "peak_gib": 3.29
+    },
+    {
+      "label": "draft 640x384x73/20",
+      "seq": 7232,
+      "step_s": 13.59,
+      "total_s": 285.8,
+      "peak_gib": 3.05
+    },
+    {
+      "label": "832x480x73/20",
+      "seq": 13184,
+      "step_s": 21.18,
+      "total_s": 443.0,
+      "peak_gib": 3.43
+    },
+    {
+      "label": "960x544x73/20",
+      "seq": 15824,
+      "step_s": 26.44,
+      "total_s": 550.0,
+      "peak_gib": 3.88
+    },
+    {
+      "label": "1024x576x73/20",
+      "seq": 17024,
+      "step_s": 28.62,
+      "total_s": 594.0,
+      "peak_gib": 4.16
+    },
+    {
+      "label": "standard 832x480x124/30",
+      "seq": 17024,
+      "step_s": 33.36,
+      "total_s": 1028.0,
+      "peak_gib": 4.55
+    },
+    {
+      "label": "640x384x124/20",
+      "seq": 12288,
+      "step_s": 20.09,
+      "total_s": 422.0,
+      "peak_gib": 3.25
+    },
+    {
+      "label": "max-long 640x384x243/20",
+      "seq": 24576,
+      "step_s": 37.07,
+      "total_s": 987.0,
+      "peak_gib": 4.93
+    },
+    {
+      "label": "quality 1024x576x124/30",
+      "seq": 23872,
+      "step_s": 48.99,
+      "total_s": 1503.0,
+      "peak_gib": 5.94
+    }
+  ],
+  "known_failures": [
+    {
+      "label": "1344x768x124/30 (官方原生)",
+      "reason": "OOM：干净状态单独跑也超显存（§11.2）"
+    },
+    {
+      "label": "832x480x243/30",
+      "reason": "OOM：长序列 + 大画布"
+    },
+    {
+      "label": "640x384x345/20",
+      "reason": "OOM：帧数超出 243 的墙"
+    }
+  ],
+  "notes": [
+    "实测一次 OOM 会污染后续所有配置，必须 wsl --shutdown 后重跑（README §11.3）",
+    "长片段/高分辨率一律用 dit_onload=disk，避免顶到 WSL 的 22.9 GiB 内存配额"
+  ]
+}

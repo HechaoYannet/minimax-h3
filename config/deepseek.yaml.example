@@ -1,0 +1,66 @@
+# ============================================================================
+# DeepSeek 提示词优化服务配置
+# ----------------------------------------------------------------------------
+# 这是前端「提示词优化」功能唯一需要的配置文件。改完不需要重启前端服务，
+# 每次点击「优化」时后端都会重新读取本文件（改完刷新页面即可看到新配置）。
+#
+# 敏感项（api_key）建议不要写死在本文件里，改用环境变量：
+#     export DEEPSEEK_API_KEY=sk-xxxx      # 写进 ~/.bashrc 或启服务前 export
+# 留空即表示「用环境变量」。两者都为空时，前端会给出明确的引导提示，
+# 不会静默失败。
+# ============================================================================
+
+api:
+  # 【url】OpenAI 兼容的 chat/completions 完整地址。
+  #   官方：https://api.deepseek.com/chat/completions
+  #   也可以写 https://api.deepseek.com/v1/chat/completions（v1 是兼容别名）
+  #   自建/中转网关直接替换成自己的地址即可。
+  url: "https://api.deepseek.com/chat/completions"
+  # 【key】API Key。留空则读取环境变量 DEEPSEEK_API_KEY。
+  key: ""
+  key_env: "DEEPSEEK_API_KEY"
+  # 请求超时（秒）。思考模式下单次生成可能较慢，默认给得比较宽。
+  timeout_s: 300
+  # 失败重试次数（仅对网络错误 / 429 / 5xx 重试，4xx 直接报错）
+  max_retries: 2
+
+model:
+  # 【model_name】模型名。官方可选：
+  #   deepseek-chat      —— 非思考模型，最快最便宜
+  #   deepseek-reasoner  —— 思考模型（旧别名）
+  #   也可直接写带版本号的模型名，例如 deepseek-v4
+  name: "deepseek-chat"
+  # 【thinking】思考模式开关。参数名与取值随官方版本演进，这里显式列出，
+  #   不猜、不写死在代码里：backend 只会把下面这几项原样拼进请求体。
+  #   enabled: false        -> 完全不发送思考相关字段
+  #   enabled: true + style: reasoning_effort -> 发送 {"reasoning_effort": "<effort>"}
+  #   enabled: true + style: thinking         -> 发送 {"thinking": {"type": "enabled"}}
+  #   enabled: true + style: both             -> 两者都发（兼容网关差异）
+  #   若某个字段被服务端拒绝，后端会把原始报错原样返回给前端，方便定位。
+  thinking:
+    enabled: false
+    style: "reasoning_effort"     # reasoning_effort | thinking | both
+    reasoning_effort: "medium"    # minimal | low | medium | high | max
+  # 采样参数。注意：思考模式下部分采样参数可能不被支持，
+  # 后端在 thinking.enabled=false 时才会带上 temperature。
+  temperature: 0.7
+  max_tokens: 8192
+  stream: true
+
+prompt:
+  # system_prompt：文件路径优先；为空则使用下面的 system_prompt_inline。
+  # 相对路径以仓库根目录为基准解析。
+  system_prompt_file: "config/prompts/system.md"
+  system_prompt_inline: ""
+  # 按输入模式追加的结构规范（相对仓库根目录）。
+  #   auto 会依据参考素材自动挑选 oneref / ref2va / base 三个之一。
+  mode_digests:
+    ref2va: "config/prompts/format-ref2va.md"
+    oneref: "config/prompts/format-oneref.md"
+    base: "config/prompts/format-base.md"
+  # 要求模型同时产出中文回译，前端「中文预览」页签用它做校对。
+  want_translation: true
+  # 追加在 system 末尾的自定义要求（多行字符串）
+  extra_instructions: |
+    - 优先保证结构字段名、标签、时间码格式完全正确，其次才是文采。
+    - 不要在正文里解释你的写作思路，解释放在 summary 段里。

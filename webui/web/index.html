@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniMax-H3 创作台</title>
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f7cff'/%3E%3Cpath d='M9 22V10l7 5 7-5v12' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body>
+<div id="app" hidden>
+
+  <!-- ============================= 左侧栏 ============================= -->
+  <aside class="rail" id="rail">
+    <div class="rail-brand">
+      <span class="logo"></span>
+      <span class="brand-text">即梦 · H3 创作台</span>
+      <button class="icon-btn" id="rail-toggle" title="收起/展开侧栏">☰</button>
+    </div>
+
+    <nav class="rail-nav">
+      <button class="nav-item active" data-view="create"><i>✦</i>创作</button>
+      <button class="nav-item" data-view="library"><i>▦</i>作品库</button>
+      <button class="nav-item" data-view="guide"><i>?</i>使用说明</button>
+      <button class="nav-item" data-view="about"><i>⚙</i>环境自检</button>
+    </nav>
+
+    <div class="rail-section">
+      <div class="rail-section-title">对话</div>
+      <div id="session-list" class="session-list"></div>
+      <button class="ghost-btn wide" id="new-session">+ 新建对话</button>
+    </div>
+
+    <div class="rail-foot">
+      <div class="foot-line" id="foot-conn">连接中…</div>
+      <div class="foot-line dim" id="foot-repo"></div>
+    </div>
+  </aside>
+
+  <!-- ============================= 主区 ============================= -->
+  <main class="main">
+
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="pill live" id="pill-server">服务 --</span>
+        <span class="pill" id="pill-gpu">GPU --</span>
+        <span class="pill" id="pill-vram">显存 --</span>
+        <span class="pill" id="pill-ram">内存 --</span>
+        <span class="pill" id="pill-queue">队列 0</span>
+      </div>
+      <div class="topbar-right">
+        <span class="pill ghost" id="pill-model">模型 --</span>
+        <button class="icon-btn" id="btn-monitor" title="显示/隐藏监控面板">▤</button>
+        <button class="icon-btn" id="btn-refresh" title="刷新配置与状态">⟳</button>
+      </div>
+    </header>
+
+    <div class="content">
+
+      <!-- ---------------- 创作视图 ---------------- -->
+      <section class="view" id="view-create">
+        <div class="hero">
+          <h1>你好，今天想要创作什么？</h1>
+          <div class="mode-tabs">
+            <button class="mode-tab active" data-mode="generate">生成</button>
+            <button class="mode-tab" data-mode="edit">编辑（参考视频）</button>
+          </div>
+        </div>
+
+        <!-- 创作意图输入 -->
+        <div class="composer">
+          <div class="composer-top">
+            <button class="attach-btn" id="btn-attach" title="添加参考素材（图片 / 视频 / 音频）">+</button>
+            <div class="attach-row" id="attach-row"></div>
+          </div>
+
+          <textarea id="prompt-input" rows="3"
+            placeholder="用中文描述你想要的画面：谁、在哪里、做什么、镜头怎么动、有哪些声音。&#10;例：雨夜的便利店门口，一个穿蓝色外套的女孩把伞收起来走进门，镜头跟着她慢慢推进，能听到雨声和门上的风铃。"></textarea>
+
+          <div class="composer-bar">
+            <div class="bar-left">
+              <label class="mini" title="按参考素材自动判定走哪种提示词结构">
+                <span>模式</span>
+                <select id="sel-mode">
+                  <option value="auto">自动判定</option>
+                  <option value="t2va">T2VA 文生</option>
+                  <option value="i2va">I2VA 首帧</option>
+                  <option value="fl2va">FL2VA 首尾帧</option>
+                  <option value="l2va">L2VA 尾帧</option>
+                  <option value="ref2va">Ref2VA 全参考</option>
+                </select>
+              </label>
+              <label class="mini"><span>预设</span>
+                <select id="sel-preset"></select>
+              </label>
+              <label class="mini"><span>分辨率</span>
+                <select id="sel-res"></select>
+              </label>
+              <label class="mini"><span>时长</span>
+                <select id="sel-dur"></select>
+              </label>
+              <label class="mini"><span>种子</span>
+                <input type="number" id="inp-seed" value="42" min="0" step="1">
+              </label>
+            </div>
+            <div class="bar-right">
+              <button class="ghost-btn" id="btn-optimize" title="调用 DeepSeek 把中文意图改写成流水线用的英文提示词">
+                ✦ 优化提示词
+              </button>
+              <button class="ghost-btn" id="btn-advanced" title="展开全部生成参数">高级参数</button>
+              <button class="primary-btn" id="btn-generate">开始生成</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="chips" id="preset-chips"></div>
+
+        <!-- 提示词结果 -->
+        <div class="card" id="prompt-card" hidden>
+          <div class="card-head">
+            <div class="tabs" id="prompt-tabs">
+              <button class="tab active" data-pane="en">英文提示词（送进流水线）</button>
+              <button class="tab" data-pane="zh">中文回译（给人看）</button>
+              <button class="tab" data-pane="notes">结构说明</button>
+              <button class="tab" data-pane="raw">调试（system / user）</button>
+            </div>
+            <div class="card-actions">
+              <button class="ghost-btn sm" id="btn-copy-prompt">复制英文</button>
+              <button class="ghost-btn sm" id="btn-use-prompt">用中文原文重来</button>
+              <button class="icon-btn sm" id="btn-close-prompt">✕</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <pre class="prompt-pane" id="pane-en"></pre>
+            <pre class="prompt-pane" id="pane-zh" hidden></pre>
+            <pre class="prompt-pane" id="pane-notes" hidden></pre>
+            <pre class="prompt-pane mono" id="pane-raw" hidden></pre>
+            <div class="optimize-status" id="optimize-status"></div>
+          </div>
+        </div>
+
+        <!-- 参考素材 -->
+        <div class="card" id="refs-card">
+          <div class="card-head">
+            <div class="card-title">参考素材 <span class="muted" id="refs-count">0</span></div>
+            <div class="card-actions">
+              <button class="ghost-btn sm" id="btn-add-image">+ 参考图</button>
+              <button class="ghost-btn sm" id="btn-add-video">+ 参考视频(静音)</button>
+              <button class="ghost-btn sm" id="btn-add-va">+ 视频+音轨</button>
+              <button class="ghost-btn sm" id="btn-add-audio">+ 音频</button>
+              <button class="ghost-btn sm" id="btn-add-path" title="直接粘贴 Windows 路径">+ 路径</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="ref-hint muted">
+              顺序有意义：它决定 <code>&lt;Picture n&gt;</code> / <code>&lt;Video n&gt;</code> /
+              <code>&lt;Audio n&gt;</code> 的编号，也决定流水线拼接参考锚点的顺序。拖动或点箭头调整。
+            </div>
+            <div id="refs-list" class="refs-list"></div>
+            <div id="risk-box" class="risk-box"></div>
+          </div>
+        </div>
+
+        <!-- 生成参数 -->
+        <div class="card collapsible" id="card-params">
+          <div class="card-head clickable" data-collapse>
+            <div class="card-title">生成参数</div>
+            <div class="card-summary" id="params-summary"></div>
+            <span class="caret">▾</span>
+          </div>
+          <div class="card-body grid" id="params-grid"></div>
+        </div>
+
+        <!-- 性能与显存 -->
+        <div class="card collapsible collapsed" id="card-perf">
+          <div class="card-head clickable" data-collapse>
+            <div class="card-title">性能 / 显存调优</div>
+            <div class="card-summary" id="perf-summary"></div>
+            <span class="caret">▾</span>
+          </div>
+          <div class="card-body grid" id="perf-grid"></div>
+        </div>
+
+        <!-- LoRA 与调度器 -->
+        <div class="card collapsible collapsed" id="card-lora">
+          <div class="card-head clickable" data-collapse>
+            <div class="card-title">LoRA 与采样调度</div>
+            <div class="card-summary" id="lora-summary"></div>
+            <span class="caret">▾</span>
+          </div>
+          <div class="card-body grid" id="lora-grid"></div>
+        </div>
+
+        <!-- 预览命令行 -->
+        <div class="card collapsible collapsed" id="card-cmd">
+          <div class="card-head clickable" data-collapse>
+            <div class="card-title">命令预览（不会执行）</div>
+            <div class="card-summary">先干跑一遍参数解析，确认无误再提交</div>
+            <span class="caret">▾</span>
+          </div>
+          <div class="card-body">
+            <button class="ghost-btn sm" id="btn-preview">解析参数</button>
+            <pre class="prompt-pane mono" id="cmd-out" hidden></pre>
+          </div>
+        </div>
+
+        <!-- 最近作品 -->
+        <div class="section-title-row">
+          <h2>最近生成</h2>
+          <button class="ghost-btn sm" id="btn-refresh-jobs">刷新</button>
+        </div>
+        <div class="gallery" id="gallery"></div>
+      </section>
+
+      <!-- ---------------- 作品库 ---------------- -->
+      <section class="view" id="view-library" hidden>
+        <h1>作品库</h1>
+        <div class="muted" id="library-root"></div>
+        <div class="table-wrap"><table class="tbl" id="library-table">
+          <thead><tr><th>时间</th><th>文件</th><th>形状</th><th>步数</th><th>种子</th>
+          <th>用时</th><th>峰值显存</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </section>
+
+      <!-- ---------------- 使用说明 ---------------- -->
+      <section class="view" id="view-guide" hidden>
+        <h1>使用说明</h1>
+        <div class="doc" id="guide-doc"></div>
+      </section>
+
+      <!-- ---------------- 环境自检 ---------------- -->
+      <section class="view" id="view-about" hidden>
+        <h1>环境自检</h1>
+        <div class="doc" id="about-doc"></div>
+        <h2>参数规格</h2>
+        <div class="table-wrap"><table class="tbl" id="spec-table">
+          <thead><tr><th>参数</th><th>分组</th><th>类型</th><th>默认</th><th>CLI</th><th>说明</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </section>
+
+    </div><!-- /content -->
+  </main>
+
+  <!-- ============================= 右侧监控 ============================= -->
+  <aside class="monitor" id="monitor">
+    <div class="monitor-head">
+      <span>运行监控</span>
+      <button class="icon-btn sm" id="btn-monitor-close">✕</button>
+    </div>
+
+    <div class="monitor-block">
+      <div class="mb-title">硬件占用</div>
+      <div class="gauge-row">
+        <div class="gauge"><span class="g-label">GPU</span><div class="bar"><i id="g-gpu"></i></div><span class="g-val" id="g-gpu-v">--</span></div>
+        <div class="gauge"><span class="g-label">显存</span><div class="bar"><i id="g-vram"></i></div><span class="g-val" id="g-vram-v">--</span></div>
+        <div class="gauge"><span class="g-label">内存</span><div class="bar"><i id="g-ram"></i></div><span class="g-val" id="g-ram-v">--</span></div>
+        <div class="gauge"><span class="g-label">CPU</span><div class="bar"><i id="g-cpu"></i></div><span class="g-val" id="g-cpu-v">--</span></div>
+      </div>
+      <canvas id="spark" width="320" height="72"></canvas>
+      <div class="mono tiny" id="hw-detail"></div>
+    </div>
+
+    <div class="monitor-block">
+      <div class="mb-title">作业进度</div>
+      <div id="job-monitor" class="job-monitor"><div class="muted">暂无作业</div></div>
+    </div>
+
+    <div class="monitor-block grow">
+      <div class="mb-title">
+        日志
+        <label class="mini tiny"><input type="checkbox" id="chk-autoscroll" checked> 自动滚动</label>
+      </div>
+      <pre class="log" id="log-stream"></pre>
+    </div>
+  </aside>
+
+</div><!-- /app -->
+
+<div id="boot" class="boot">
+  <div class="boot-box">
+    <div class="spinner"></div>
+    <div id="boot-msg">正在连接 WSL 后端…</div>
+    <pre id="boot-detail" class="mono tiny" hidden></pre>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+
+<div id="modal" class="modal" hidden>
+  <div class="modal-box">
+    <div class="modal-head"><span id="modal-title"></span><button class="icon-btn sm" id="modal-close">✕</button></div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot" id="modal-foot"></div>
+  </div>
+</div>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

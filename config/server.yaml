@@ -1,0 +1,64 @@
+# ============================================================================
+# 前端服务配置（Windows 浏览器 <-> WSL 后端）
+# ----------------------------------------------------------------------------
+# 网络：本机 WSL 已启用 networkingMode=Mirrored（~/.wslconfig），
+#       WSL 里监听 0.0.0.0:<port> 后，Windows 侧直接用 127.0.0.1:<port> 就能访问，
+#       不需要 netsh portproxy，也不需要查 WSL 的 IP。
+#       若将来把 Mirror 模式关掉，把 bind 改成 0.0.0.0 仍可从 Windows 访问
+#       （host 用 `wsl hostname -I` 查到的地址），见 webui/README.md。
+# ============================================================================
+
+server:
+  host: "0.0.0.0"          # 监听地址；Mirror 模式下 127.0.0.1 也够用
+  port: 8765               # 端口；被占用时启动脚本会自动 +1 并在控制台报出新端口
+  open_browser: true       # 由 Windows 启动脚本决定是否自动开浏览器
+
+paths:
+  # 相对仓库根目录解析；也可写绝对路径。
+  repo_root: "."           # 仓库根 = 本文件上一级
+  cache_dir: "cache/webui" # 作业记录、日志、SSE 事件落盘位置
+  outputs_dir: "workspace/webui/outputs"
+  jobs_dir: "cache/webui/jobs"
+  uploads_dir: "cache/webui/uploads"
+
+jobs:
+  # 同一时刻只允许一个生成作业在跑：8 GiB 显存只能容纳一条流水线，
+  # 并发提交会直接 OOM（README §11.3 记录过一次 OOM 污染后续所有配置）。
+  # 后提交的作业进入队列，前一个结束后自动开始。
+  max_concurrent: 1
+  queue_enabled: true
+  # 取消作业时先 SIGINT（h3_generate 会在当前步结束后退出），
+  # 超过这个秒数还没退再 SIGKILL 整个进程组。
+  cancel_grace_s: 20
+  # 作业日志保留条数（事件流是全量落盘的，这里只限制内存里保留多少行）
+  log_tail_lines: 400
+
+limits:
+  # 参数硬上限。前端会按这里的值做即时校验并给出中文提示，
+  # 后端在提交时再校验一遍（前端被绕过也拦得住）。
+  max_num_frames: 400
+  max_steps: 80
+  max_prompt_chars: 12000
+  max_upload_mb: 512
+  allowed_ref_ext:
+    image: [".png", ".jpg", ".jpeg", ".webp", ".bmp"]
+    video: [".mp4", ".mov", ".mkv", ".webm", ".avi"]
+    audio: [".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".opus"]
+
+defaults:
+  # 前端首次打开时的默认值（生成参数面板）
+  preset: "draft"
+  seed: 42
+  scheduler: "auto"
+  dit_onload: "cpu"
+  sdpa_backend: "cudnn"
+  lora: "~/source/minimax-h3/models/AfterMidnight_ref2va_h3_softer_rank64_v1.safetensors"
+  lora_enabled: true
+  # 硬件轮询间隔（秒）；nvidia-smi 单次约 30 ms，1 秒足够
+  telemetry_interval_s: 1.5
+
+telemetry:
+  # nvidia-smi 在 WSL 里的路径（/usr/lib/wsl/lib/nvidia-smi）
+  nvidia_smi: "nvidia-smi"
+  # 是否在页面上显示逐条系统日志
+  expose_server_log: true
