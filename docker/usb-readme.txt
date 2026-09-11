@@ -1,4 +1,4 @@
-﻿MiniMax-H3 · Ref2VA —— 离线镜像 U 盘
+MiniMax-H3 · Ref2VA —— 离线镜像 U 盘
 =====================================
 
 这里装的是在 WSL 里跑通的 MiniMax-H3 Ref2VA 推理环境，已经固化成一个 Docker 镜像。
@@ -15,6 +15,9 @@
 目标机器需要什么
 ----------------
   1. Windows + Docker Desktop（WSL2 后端），并且已经启动
+     · 建议 Docker Desktop 25 及以上：镜像是 Docker 29 用 containerd 镜像存储导出的，
+       层数据放在包内的 blobs/ 下（同一个包里既有 manifest.json 也有 OCI 索引），
+       更老的 docker load 可能不认这个布局
   2. NVIDIA 显卡驱动。CUDA 运行时随镜像自带，宿主机只要有驱动即可；
      容器通过 "docker run --gpus all" 拿到显卡
   3. 可用磁盘空间 ≈ 镜像大小的两倍（分片和合并出来的 tar 会同时存在）

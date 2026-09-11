@@ -206,6 +206,9 @@ pwsh -File .\join-and-load.ps1 -WorkDir D:\h3       # 指定合并的工作目�
 - 合并需要 **≈ 镜像大小 × 2** 的空闲空间（分片 + 合并结果同时存在）。
 - 权重搬不过去：U 盘上**放不下任何一个 >4 GB 的文件**。要连权重一起带走，得把 U 盘格成
   exFAT/NTFS，或改用移动硬盘。U 盘上的 `README.txt` 也写了这一条。
+- 目标机器 **Docker Desktop 建议 25 及以上**：镜像是 Docker 29 + containerd 镜像存储导出的，
+  save 包里层数据在 `blobs/` 下（同一个包同时带 `manifest.json` 与 OCI 索引），更老的
+  `docker load` 可能不认这个布局。
 
 ---
 
