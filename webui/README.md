@@ -3,6 +3,11 @@
 一个仿「即梦」的操作界面，套在现有工程外面：**写中文意图 → DeepSeek 改写成官方规范的英文提示词 → 调参数 → 提交生成 → 看进度和硬件占用**。
 生成仍然走原来的 `run_h3.sh gen`，流水线一行没改。
 
+另有一个「网盘」页签（可选能力）：网络慢、视频在线播放卡的时候，把产物**原样打包加密（密码 123456）→ 传到夸克网盘**，
+拿分享链接去下载，速度走网盘而不是这台机器的上行带宽。**不重新编码，画质不变**；套加密 zip 是为了防网盘内容抽检
+（同时把「统一密码」落在压缩包上 —— 分享链接的提取码是服务端生成的，指定不了）。反向也能把网盘文件下载回本机当参考素材。
+用的是 `web_disk/` 下的夸克官方 CLI，设计与踩坑见 [`docs/QUARK.md`](../docs/QUARK.md)。
+
 ```bash
 # 1) 在 WSL(Ubuntu) 终端里起后端（前台运行，Ctrl+C 停；关掉终端即停服）
 cd /mnt/d/otherProject/minimax-h3 && python3 webui/serve.py
@@ -27,6 +32,7 @@ pwsh webui/start.ps1
 config/                        ← 全部配置（唯一需要改的地方）
   deepseek.yaml                提示词优化：url / model / thinking / key / system_prompt
   server.yaml                  前端服务：监听、并发、上限、默认值
+  quark.yaml                   夸克网盘：「网盘」页签的压缩/密码/分享/runner（见 docs/QUARK.md）
   params.spec.json             参数规格（由 webui/tools/gen_params.py 从工程本体生成，不要手改）
   prompts/
     system.md                  提示词优化的 system prompt
@@ -45,6 +51,8 @@ webui/
     runlog.py                  运行日志系统（结构化/落盘/订阅）+ LLM 调用记录仓库
     estimate.py                序列长度/耗时/风险预估（复用 scripts/h3_audit.py 的算法）
     telemetry.py               硬件遥测（nvidia-smi + /proc）
+    quark.py                   夸克网盘 CLI 封装（node 探测 / WSLENV / 路径翻译 / 任务管理）
+    pack.py                    上传前的压缩：ffmpeg 转码 + 纯标准库加密 zip（密码 123456）
     config.py, util.py         配置读取与工具
   web/                         静态前端（无构建步骤，改完刷新即可）
     index.html  assets/app.css  assets/app.js  assets/guide.md
@@ -55,8 +63,12 @@ webui/
     test_logging.py            运行日志 / LLM 记录 / 日志端点的离线自测
     test_log_render.js         日志行渲染的桩测试（node，不需要浏览器）
     test_docs_render.js        参数文档渲染的桩测试（node，不需要浏览器）
+    test_disk.py               夸克网盘接入的离线自测（压缩包往返 / 转码 / 全部 /api/disk/*）
+    test_disk_ui.js            网盘页签的静态自检（node：id 对账 / 按钮绑定 / 端点对账）
+    test_prompt_flow.js        「优化出的英文有没有进流水线」的静态自检（node：提交路径 / 四条分支）
 
 docs/PARAMETERS.md             由 gen_params.py --write-docs 生成的参数参考手册
+docs/QUARK.md                  夸克网盘接入的设计与踩坑记录（CLI 环境判定、加密 zip、约束对齐）
 ```
 
 ---
@@ -75,6 +87,9 @@ docs/PARAMETERS.md             由 gen_params.py --write-docs 生成的参数参
                                                │   scripts/h3_generate.py（原工程，行为未改）      │
                                                └─────────────────────────────────────────────────┘
 ```
+
+第四条链路（可选，网盘）：后端在 WSL 里用 `cmd`/interop 拉起 **Windows 侧的 `node.exe`** 跑夸克 CLI，
+产物原样打包加密后上传，页面拿到分享链接；配置见 `config/quark.yaml`，设计见 [`docs/QUARK.md`](../docs/QUARK.md)。
 
 三条边界：
 
@@ -168,6 +183,13 @@ conda 环境里本来就有），不引 FastAPI/uvicorn。实测后端常驻内�
 `promptopt.py` 用一个小状态机把流式增量切成三段，前端分页签实时渲染。
 模型漏段时 `done.missing` 会列出来，页面给警告（而不是假装成功）。
 
+**哪一份提示词进流水线**：`POST /api/jobs` 的 `prompt` 字段由前端的 `effectivePrompt()` 决定 ——
+有**新鲜**的英文优化结果（`S.optimize.source` 与输入框当前内容一致）就用英文，否则回落输入框里的中文原文；
+输入框下面一直写着本次会用哪一份。优化之后又改了输入框，英文会被判为「已失效」而**不会**被送进流水线
+（而不是悄悄用旧英文）；「用中文原文重来」等价于显式选择中文原文。
+`test_prompt_flow.js` 钉住这条链路：`buildSubmitBody` 曾经直接读输入框，于是优化出的英文只停在页面上、
+提交给 `run_h3.sh` 的却是中文原文 —— 页面显示的和实际生成的是两份东西。
+
 ### 3.3 其余端点
 
 | 方法 | 路径 | 说明 |
@@ -193,6 +215,25 @@ conda 环境里本来就有），不引 FastAPI/uvicorn。实测后端常驻内�
 | POST | `/api/logs/client` | 浏览器端上报日志（前端异常等），单次 ≤ 50 条 / 64 KiB |
 | GET | `/api/llm/runs` | LLM 调用记录列表（`limit` / `status` / `q`） |
 | GET | `/api/llm/runs/<id>` | 单次调用的完整记录：请求 / system / user / 输出 / usage / 事件 |
+
+**夸克网盘**（见 [`docs/QUARK.md`](../docs/QUARK.md)）。除 `status` 外都返回 `{ok, task}`，
+进度走 SSE，与生成作业同一套事件模型：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/disk/status` | CLI / node / 授权状态。`probe=0` 不发网络请求，只给「上次已知」；`probe=1` 真去问一次（12s 内复用缓存）。**没查过时返回 `auth_known: false` 且不带 `logged_in`** —— 页面对应显示「加载中…」，绝不把「不知道」画成「未授权」 |
+| GET | `/api/disk/files` | 浏览目录：`parent_fid` / `page_size` / `all=1`（读 CLI 的 Artifact 拿全量） |
+| GET | `/api/disk/search` | 搜索：`keyword` / `size` / `search_type` / `parent_fid` |
+| POST | `/api/disk/login` | 发起授权：`{}` 走浏览器 OAuth，`{token}` 走授权码 |
+| POST | `/api/disk/publish` | **压缩 + 加密打包 + 上传 + 建分享链接**；`dry_run=true` 只压不传 |
+| POST | `/api/disk/fetch` | 把网盘文件下载回 `workspace/netdisk/`（`fid` 或 `fids`） |
+| GET | `/api/disk/tasks` `/tasks/<id>` | 网盘任务列表 / 单个任务 |
+| GET | `/api/disk/tasks/<id>/stream` | SSE：任务事件流（`stage` / `progress` / `cli` / `exit` …） |
+| GET | `/api/disk/tasks/<id>/log` | 任务原始输出尾部 |
+| POST | `/api/disk/tasks/<id>/cancel` | 取消（先 SIGINT，再 SIGKILL 进程组） |
+
+> 未授权时这几条会返回 **401 + `need_login: true`**（body 里是 CLI 的 `msg` 原文），
+> 页面据此直接把授权入口顶出来，而不是丢一句「失败」。
 
 ---
 
@@ -255,6 +296,44 @@ multimodal:
 
 > 想知道当前实际发了什么：页面上「调试」页签会显示完整的 system / user / 思考过程。
 
+### 网盘（夸克）：让慢网络下也能把片子取走
+
+配置只有一个文件：`config/quark.yaml`（**热读取**，改完刷新页面即生效）。完整设计见
+[`docs/QUARK.md`](../docs/QUARK.md)，这里只列最常动的几项：
+
+```yaml
+runner: auto            # auto | windows | linux —— 后端在 WSL，node 在 Windows 时走 interop
+archive:
+  enabled: true         # 打包成加密 zip：内容加密防抽检 + 统一密码
+  password: "123456"    # 分享链接的提取码是服务端生成的、指定不了，所以密码落在压缩包上
+  level: 0              # 0=只打包（视频压不动，deflate 白烧 CPU）；要塞文档再调 6
+  tool: auto            # 打包实现：auto=优先 bsdtar（Windows 自带 tar.exe，74 MiB/s）
+                        # 没它就退回纯 Python（2.2 MiB/s）；也可强制 tar / python
+compress:
+  enabled: false        # 默认关：重新编码是**有损**的，画质优先就别开
+  crf: 26               # 要省流量时再开：越大越小越糊；页面上也能临时勾
+  max_edge: 1280        # 只缩不放
+share:
+  enabled: true
+  url_type: 1           # 1=公开链接（只有压缩包一层密码） 2=私密链接（夸克另给提取码）
+  expired_type: 1       # 1=永久 2=1天 3=7天 4=30天 …
+upload:
+  parent_fid: ""        # 留空 = 用下面的 dir_name 自动建/复用一个目录（不碰根目录 "0"）
+  dir_name: MiniMax-H3  # 【实测坑】CLI 的「默认目录」是空的：省略 --parent-fid 会直接报
+                        #   参数错误: [upload dir blank]，所以留空时我们按这个名字先建/复用目录
+download:
+  dir: workspace/netdisk
+```
+
+**两条容易踩的**：
+
+1. **CLI 认「agent 环境」**，认不出来会直接返回 `{"code":-104,"msg":"无法识别当前 Agent 环境"}`。
+   实测必须带 `DSH_HOME` 或 `DSH_SESSION_ID` 之一（只给 `QK_AGENT_ID` 没用）；
+   Windows runner 下这几个变量要经 `WSLENV` 才能过界。这些都封装在 `backend/quark.py`，
+   一般不用动 `agent` 段。
+2. **改了 `webui/backend/` 下的代码要重启后端**（配置不用）。重启会触发一次「孤儿进程清理」，
+   **正在跑的生成作业会被杀掉** —— 等作业跑完再重启。
+
 ### 改参数上限与默认值
 
 `config/server.yaml` 的 `limits` 与 `defaults`。改了 `scripts/h3_generate.py` 的参数
@@ -303,6 +382,8 @@ max-long      832x480x243         31040   31040
 | 取消走 SIGINT → 超时 SIGKILL 进程组 | `run_h3.sh` 会 spawn 出 python 子进程，只杀父进程会留下孤儿 |
 | `/api/file` 限定目录 | 本地工具也不该变成任意文件读取的口子 |
 | 上传大小/扩展名白名单 | 手滑拖进一个 8 GB 的 mkv 不该把磁盘写满 |
+| 网盘任务单并发 + 可取消 | 上传占的是上行带宽，和生成抢网卡没意义；一次发一个片子才看得清 |
+| 上传前**强制**压缩 + 加密打包 | 「网络慢」这个前提下的产物必须足够小，且有统一密码；不提供「原样直传」的默认路径 |
 
 ---
 
@@ -318,6 +399,10 @@ max-long      832x480x243         31040   31040
   都返回 200，模型能正确读出图中内容。离线回归仍走 `webui/tools/mock_deepseek.py`
   （本次新增：content 数组解析、图片计数、base64 可解性校验），SSE 解析 / 三段标记 / 错误分支 / 无 Key 分支都有覆盖。
   若某个中转网关对 `thinking` 字段名不一致，把 `thinking.style` 换成 `both` 或 `thinking` 即可。
+- **网盘页签依赖 Windows 侧的 Node**（WSL 里没装 node 时经 interop 跑 `node.exe`）；
+  哪天 interop 被禁，在 WSL 里装个 node 即可，`runner: auto` 会自动切过去。
+- **分享链接的提取码是服务端生成的，改不了**，所以「统一密码」落在压缩包上；
+  压缩包用的是 ZipCrypto（不是 AES），强度只够「防误传」，详见 `docs/QUARK.md` §9。
 - **多模态附图的三个服务端约束**（超出会 400）：单图 base64 ≤ 32 MiB、请求体 ≤ 48 MiB、单请求 ≤ 600 张。
   `media.py` 默认按远低于这些值的预算工作（20 / 40 MiB），超预算的图片跳过并在日志里说明。
   `refs` 里没有 `path` 的客户端（例如直接 curl `/api/optimize`）不会附图，只会在 `notes` 里提示。
@@ -359,7 +444,8 @@ max-long      832x480x243         31040   31040
 ### 8.3 LLM 调用一次一份完整记录
 
 `GET /api/llm/runs/<id>` 返回：请求参数、**system / user 全文**、流式输出
-（英文提示词 / 中文回译 / 结构说明）、思考过程、`usage`、耗时、错误、重试与中断事件。
+（英文提示词 / 中文回译 / 结构说明）、**模型原始输出（解析前全文）**、思考过程、`usage`、
+耗时、错误、重试与中断事件。
 文件落在 `cache/webui/logs/llm/<run_id>.json`，只保留最近 `llm_max_runs` 份。
 
 - `llm_capture`：`full`（默认，存全文）/ `summary`（只存长度与 tokens）/ `off`。
@@ -367,7 +453,33 @@ max-long      832x480x243         31040   31040
   历史记录在「运行日志 → LLM 调用记录」，可下载 JSON。
 - 客户端中途断开（关页面）会把这次调用标成 `aborted`，而不是假装成功。
 
-### 8.4 配置与等级
+### 8.4 模型不按格式输出时，排查靠这些字段
+
+提示词优化用的是固定标记协议（`<<<H3_PROMPT>>>` / `<<<H3_ZH>>>` / `<<<H3_NOTES>>>`）。
+模型不听话**不算调用失败**（HTTP 200、tokens 照扣），但必须能事后查 —— 所以记录里除了解析
+结果，还留着解析前的现场：
+
+| 字段 | 含义 |
+|---|---|
+| `response.raw` | 模型原始输出（解析前全文；`capture=full` 时才有正文） |
+| `response.raw_chars` | 原始输出总长度；`summary` 模式也留，>0 说明模型确实说了话 |
+| `response.stray` | 落在标记之外、被解析器丢掉的文字（前言 / 尾注 / 整段自然语言） |
+| `response.markers` | 实际见到过哪些开始标记；`[]` = 完全没按协议走 |
+| `response.format_ok` | 三段是否都拿到了；`false` 时页面状态显示 `ok·缺段` |
+| `response.bad_chunks` | SSE 里解析不了的行数（被代理/网关改写成 HTML 报错页时会 >0） |
+| `events[].kind=unterminated` | 某段漏写结束标记：正文按原文收下，另记一条事件说明 |
+
+运行日志里按事件名同样筛得到：`llm.format`（调用成功但缺标记段，warn）、
+`llm.bad_stream`（一行 SSE 都解析不出来）、`llm.abort`（前端断开）、`llm.error`。
+
+页面路径：「优化提示词」状态行 →「查看本次 LLM 调用记录」→「原始输出（模型原文，未经解析）」；
+历史记录在「运行日志 → LLM 调用记录」，可下载整份 JSON 存档。
+
+> 排障顺序建议：先看 `markers`（一个都没有 = 模型没理协议，问题在 system prompt）、
+> 再看 `missing`（只缺后半段 = 被 max_tokens 截断）、再看 `bad_chunks`（= 根本没连到
+> 真正的模型端点）。三种原因的修法完全不同，别混在一起猜。
+
+### 8.5 配置与等级
 
 见 `config/server.yaml` 的 `logging` 段（等级、容量、目录、轮转、是否暴露 API、
 LLM 记录开关与保留份数）。**等级可以在页面上运行时就改**（`POST /api/logs/level`），
@@ -398,6 +510,11 @@ curl -s -X POST http://127.0.0.1:8765/api/preview -H 'Content-Type: application/
 # 4) 运行日志 / LLM 记录 / 日志端点自测（纯离线；内部起临时服务 + 假 DeepSeek）
 python3 webui/tools/test_logging.py -v
 node webui/tools/test_log_render.js webui/web/assets/app.js   # 日志行渲染（可选）
+
+# 4.5) 网盘接入自测（纯离线：临时端口 + 临时 cache，不会真的上传、不会弹浏览器）
+python3 webui/tools/test_disk.py                               # 压缩包往返 / 转码 / 全部 /api/disk/*
+node webui/tools/test_disk_ui.js                               # 网盘页签静态自检（可选）
+node webui/tools/test_prompt_flow.js                           # 「优化 -> 提交」提示词链路自检（可选）
 
 # 5) 真跑一次最便宜的档（约 1 分钟，含模型装载）
 curl -s -X POST http://127.0.0.1:8765/api/jobs -H 'Content-Type: application/json' \

@@ -15,9 +15,11 @@ const S = {
   values: {},                 // 表单值 id -> value，取值口径来自 config/params.spec.json
   refs: [],                   // 参考素材
   mode: 'auto',
-  optimize: { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '', runId: '', attachments: [] },
+  // source = 出这段英文时输入框里的中文原文；提交时靠它判断「优化结果还对不对得上输入框」
+  optimize: { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '', runId: '', attachments: [], source: '', useZh: false },
   estimate: null, risks: [], jobs: [], activeJob: null, telemetry: null,
   llm: { runs: [], stats: null },
+  disk: null,                 // 网盘页签的状态（见文件末尾的「夸克网盘」一节）
   ui: { monitor: true, railCollapsed: false, view: 'create', promptPane: 'en',
         logLevel: 'info', logSource: 'all', logQ: '', logFollow: true },
 };
@@ -93,6 +95,7 @@ async function boot() {
     renderPanelDocs();
     bindEvents();
     applyLoggingConfig(cfg);
+    applyDiskConfig(cfg.disk);
     startTelemetry();
     startLogStream();
     await refreshJobs();
@@ -100,6 +103,7 @@ async function boot() {
     loadAboutDoc();
     $('app').hidden = false;
     $('boot').hidden = true;
+    updatePromptUse();
     if (!((cfg.deepseek || {}).key_present)) {
       toast('未配置 DeepSeek API Key：提示词优化不可用（生成不受影响）。' +
         '在 config/deepseek.yaml 填 api.key，或设置环境变量 DEEPSEEK_API_KEY 后重启服务。', 'warn', 10000);
@@ -761,12 +765,44 @@ function bindEvents() {
   $('btn-generate').onclick = () => submitJob(false);
   $('btn-preview').onclick = previewCmd;
   $('btn-refresh-jobs').onclick = refreshJobs;
+  // 网盘页签
+  $('btn-disk-refresh').onclick = () => loadDiskStatus(true);
+  $('btn-disk-login').onclick = () => diskLogin('');
+  $('btn-disk-login-token').onclick = () => {
+    const t = $('disk-token').value.trim();
+    if (!t) { toast('先粘贴授权码', 'warn'); return; }
+    diskLogin(t);
+  };
+  $('btn-disk-publish').onclick = diskPublish;
+  $('btn-disk-tasks-refresh').onclick = refreshDiskTasks;
+  $('btn-disk-root').onclick = () => diskBrowse('0');
+  $('btn-disk-up').onclick = () => {
+    const st = disk().stack || [];
+    diskBrowse(st.length ? st.pop() : '0');
+  };
+  $('btn-disk-search').onclick = diskSearch;
+  $('disk-opt-crf').onchange = () => {
+    const c = (S.cfg && S.cfg.disk && S.cfg.disk.compress) || {};
+    c.crf = Number($('disk-opt-crf').value) || 26;
+    $('disk-publish-hint').textContent =
+      '压缩：CRF ' + c.crf + ' / ' + (c.preset || '') + ' / 最长边 ' + (c.max_edge || '') + 'px（页面上的改动只对本次上传生效）';
+  };
+  $('disk-search').addEventListener('keydown', (e) => { if (e.key === 'Enter') diskSearch(); });
   $('btn-copy-prompt').onclick = () => {
     const txt = S.optimize.en || $('prompt-input').value;
     navigator.clipboard.writeText(txt).then(() => toast('已复制英文提示词', 'ok', 2400))
       .catch(() => toast('复制失败，请手动选择文本', 'err'));
   };
-  $('btn-use-prompt').onclick = () => { $('prompt-input').focus(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+  // 「用中文原文重来」：放弃这次的英文优化结果，改回用输入框里的中文生成
+  $('btn-use-prompt').onclick = () => {
+    S.optimize.useZh = true;
+    updatePromptUse();
+    $('prompt-input').focus();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    toast('已改回用中文原文生成；想再用英文，点「✦ 优化提示词」重新优化', 'info', 5200);
+  };
+  // 优化之后再动输入框 = 英文结果已失效，必须马上把这件事显出来
+  $('prompt-input').addEventListener('input', updatePromptUse);
   $('btn-close-prompt').onclick = () => { $('prompt-card').hidden = true; };
   $('btn-advanced').onclick = () => {
     ['card-params', 'card-perf', 'card-lora', 'card-cmd'].forEach(id => $(id).classList.remove('collapsed'));
@@ -802,9 +838,10 @@ function bindEvents() {
   $('new-session').onclick = () => {
     S.refs = []; renderRefs();
     $('prompt-input').value = '';
-    S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '', runId: '' };
+    S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '', runId: '', attachments: [], source: '', useZh: false };
     $('prompt-card').hidden = true;
     scheduleEstimate();
+    updatePromptUse();
     toast('已清空当前创作（生成参数保持不变）', 'ok', 2600);
   };
   $('modal-close').onclick = () => { $('modal').hidden = true; };
@@ -862,11 +899,21 @@ async function refreshAll() {
 }
 
 function selectView(v) {
-  ['create', 'library', 'guide', 'logs', 'about'].forEach(x => { $('view-' + x).hidden = (x !== v); });
+  ['create', 'library', 'disk', 'guide', 'logs', 'about'].forEach(x => { $('view-' + x).hidden = (x !== v); });
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   S.ui.view = v;
   if (v === 'library') renderLibrary();
   if (v === 'logs') { startFullLogStream(false); loadLlmRuns(); }
+  if (v === 'disk') {
+    fillDiskSources();
+    refreshDiskTasks();
+    // 进页签就真去问一次账号状态（服务端 12s 内复用缓存，不会反复打网盘接口）；
+    // 未授权时不去浏览：那会白挨一个 401，页面上已经有「去授权」的引导了
+    loadDiskStatus(true).then(() => {
+      const st = disk().status;
+      if (st && st.logged_in && !disk().files.length) diskBrowse('0');
+    });
+  }
 }
 
 /* ------------------------------------------------------------------ 提示词优化 */
@@ -879,9 +926,11 @@ async function optimize() {
       '或在 WSL 里 export DEEPSEEK_API_KEY 后重启服务。', 'err', 10000);
     return;
   }
-  S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: true, system: '', user: '', runId: '', attachments: [] };
+  // source 记下「这段英文是给哪份中文写的」，提交时再和输入框比一次
+  S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: true, system: '', user: '', runId: '', attachments: [], source: chinese, useZh: false };
   $('prompt-card').hidden = false;
   setPromptPanes();
+  updatePromptUse();
   $('optimize-status').className = 'optimize-status';
   $('optimize-status').textContent = '正在请求 DeepSeek …';
   const btn = $('btn-optimize');
@@ -979,7 +1028,8 @@ function handleOptimizeEvent(ev, obj) {
     const miss = obj.missing || [];
     finishOptimize('完成 · 结构 ' + (obj.mode || '') + ' · 时长对齐 ' + obj.duration_s + 's' +
       (u.total_tokens ? ' · tokens ' + u.total_tokens : '') +
-      (miss.length ? '\n⚠ 模型没有输出这些段：' + miss.join(' / ') + '（建议重试）' : ''), miss.length > 0);
+      (miss.length ? '\n⚠ 模型没有输出这些段：' + miss.join(' / ') +
+        '（点右侧「查看本次 LLM 调用记录」看模型原文，或直接重试）' : ''), miss.length > 0);
   }
 }
 
@@ -1015,23 +1065,61 @@ function finishOptimize(msg, isErr) {
   const st = $('optimize-status');
   st.className = 'optimize-status ' + (isErr ? 'err' : 'ok');
   st.textContent = msg;
+  // 这次调用的完整记录已经落盘：给一个直达入口。
+  // 格式失败时同样要给 —— 那正是最需要回看 system/user/原始输出的时候。
+  if (S.optimize.runId) {
+    const link = el('button', 'link-btn', ' → 查看本次 LLM 调用记录');
+    link.onclick = () => openLlmRun(S.optimize.runId);
+    st.appendChild(link);
+  }
+  updatePromptUse();
   if (!isErr) {
-    // 这次调用的完整记录已经落盘：给一个直达入口，方便回看 system/user/输出/think
-    if (S.optimize.runId) {
-      const link = el('button', 'link-btn', ' → 查看本次 LLM 调用记录');
-      link.onclick = () => openLlmRun(S.optimize.runId);
-      st.appendChild(link);
-    }
     toast('提示词已生成（' + (S.optimize.mode || '') + '），可直接开始生成', 'ok', 4200);
     if (S.ui.view === 'logs') loadLlmRuns();
   }
 }
 
 /* ------------------------------------------------------------------ 提交生成 */
+/* 这里是唯一决定「送进流水线的到底是哪一份提示词」的地方。
+   原先 buildSubmitBody 直接读输入框，于是优化出来的英文只停在页面上、从没进过流水线 ——
+   「优化提示词」和「开始生成」就是在这一行断开的。
+   规则：优化结果还在、且输入框自那之后没改过 → 用英文；否则用输入框里的中文原文。 */
+function effectivePrompt() {
+  const zh = $('prompt-input').value.trim();
+  const en = (S.optimize.en || '').trim();
+  // zh 为空时仍认英文：英文才是真正那份提示词，输入框只是它的来源
+  const fresh = !!en && !S.optimize.useZh && (S.optimize.source === zh || zh === '');
+  return { text: fresh ? en : zh, source: fresh ? 'en' : 'zh', zh: zh, en: en,
+           stale: !!en && !S.optimize.useZh && !fresh };
+}
+
+/* 把「本次会用哪一份提示词」明确写在输入框下面：两份提示词不该悄悄错开。 */
+function updatePromptUse() {
+  const node = $('prompt-use');
+  if (!node) return;
+  const e = effectivePrompt();
+  let cls = 'optimize-status';
+  let txt;
+  if (e.source === 'en') {
+    cls += ' ok';
+    txt = '本次生成使用：英文优化提示词（' + e.en.length + ' 字）';
+  } else if (e.stale) {
+    cls += ' warn';
+    txt = '本次生成使用：中文原文 —— ⚠ 优化结果已失效（优化之后输入框又改过），'
+      + '要按英文生成请重新点「✦ 优化提示词」';
+  } else if (S.optimize.useZh) {
+    txt = '本次生成使用：中文原文（你点了「用中文原文重来」）';
+  } else {
+    txt = '本次生成使用：中文原文（尚未优化）';
+  }
+  node.className = cls;
+  node.textContent = txt;
+}
+
 function buildSubmitBody(force) {
   const v = S.values;
   return Object.assign(estimatePayload(), {
-    prompt: $('prompt-input').value.trim(),
+    prompt: effectivePrompt().text,
     steps: v.steps, seed: v.seed, preset: v.preset,
     lora: v.lora || null, lora_alpha: v.lora_alpha,
     vram_limit: v.vram_limit, activation_reserve: v.activation_reserve,
@@ -1046,13 +1134,14 @@ function buildSubmitBody(force) {
 }
 
 async function submitJob(force) {
+  const eff = effectivePrompt();
   const body = buildSubmitBody(force);
   if (!body.prompt) { toast('提示词不能为空', 'warn'); return; }
   const btn = $('btn-generate');
   btn.disabled = true;
   try {
     const r = await api('/api/jobs', { method: 'POST', body: JSON.stringify(body) });
-    toast('作业已提交：' + r.job.id, 'ok', 4200);
+    toast('作业已提交：' + r.job.id + '（用 ' + (eff.source === 'en' ? '英文优化提示词' : '中文原文') + '）', 'ok', 5200);
     (r.warnings || []).forEach(w => toast(w, 'warn', 9000));
     S.activeJob = r.job.id;
     await refreshJobs();
@@ -1119,7 +1208,7 @@ async function refreshJobs() {
   try {
     const r = await api('/api/jobs');
     S.jobs = r.jobs || [];
-    renderJobs(); renderGallery(); renderLibrary();
+    renderJobs(); renderGallery(); renderLibrary(); fillDiskSources();
     const running = S.jobs.filter(j => j.status === 'running' || j.status === 'cancelling').length;
     const queued = ((r.queue || {}).queued || []).length;
     const pill = $('pill-queue');
@@ -1402,8 +1491,11 @@ function renderLlmRuns() {
      (r.duration_s || 0).toFixed(2) + 's',
      (oc.prompt || 0) + ' / ' + (oc.translation || 0) + ' / ' + (oc.notes || 0),
      r.error || ''].forEach(c => tr.appendChild(el('td', null, c)));
-    const cls = r.status === 'ok' ? 'ok' : (r.status === 'error' ? 'err' : 'warn');
-    tr.children[1].innerHTML = '<span class="badge ' + cls + '">' + esc(r.status) + '</span>';
+    let cls = r.status === 'ok' ? 'ok' : (r.status === 'error' ? 'err' : 'warn');
+    let label = r.status;
+    // 调用成功但模型没按标记协议输出：最需要被看见的一类失败，别混在 ok 里
+    if (r.status === 'ok' && r.format_ok === false) { cls = 'warn'; label = 'ok·缺段'; }
+    tr.children[1].innerHTML = '<span class="badge ' + cls + '">' + esc(label) + '</span>';
     const td = el('td');
     const b = el('button', 'ghost-btn sm', '详情');
     b.onclick = () => openLlmRun(r.id);
@@ -1429,6 +1521,14 @@ async function openLlmRun(id) {
     'run ' + run.id + ' · ' + run.status + ' · ' + (run.duration_s || 0) + 's' +
     (run.usage && run.usage.total_tokens ? ' · tokens ' + run.usage.total_tokens : '') +
     (run.capture ? ' · capture=' + run.capture : '')));
+  const miss = res.missing || [];
+  if (res.format_ok === false || miss.length) {
+    box.appendChild(el('div', 'tiny',
+      '⚠ 模型没有按 <<<H3_PROMPT>>> / <<<H3_ZH>>> / <<<H3_NOTES>>> 协议输出：缺少 ' +
+      (miss.join(' / ') || '(未知)') + ' 段；实际见到的标记：' +
+      ((res.markers || []).join(', ') || '一个都没有') +
+      '。下面「原始输出」就是模型原文，可直接照着调提示词。'));
+  }
   sec('system prompt（引用：' + (((req.system_sources || []).join(', ')) || '-') + '）',
     req.system || '（未保存全文；字符数 ' + (req.system_chars || 0) + '）');
   sec('user message', req.user || '（未保存全文；字符数 ' + (req.user_chars || 0) + '）');
@@ -1437,6 +1537,11 @@ async function openLlmRun(id) {
   sec('结构说明', out.notes);
   if (res.thinking) sec('思考过程', res.thinking);
   else if (res.reasoning_chars) sec('思考过程', '（未保存全文；共 ' + res.reasoning_chars + ' 字符）');
+  // 解析前的模型原文：格式不符时唯一能还原「它到底说了什么」的东西
+  sec('原始输出（模型原文，未经解析）',
+    res.raw || '（未保存正文；共 ' + (res.raw_chars || 0) + ' 字符' +
+    (run.capture && run.capture !== 'full' ? '，capture=' + run.capture + ' 不存正文' : '') + '）');
+  if (res.stray) sec('标记之外（被解析器丢弃的文字）', res.stray);
   if ((run.events || []).length) {
     sec('事件', run.events.map(e => e.t + '  [' + e.kind + '] ' + e.message).join('\n'));
   }
@@ -1444,6 +1549,9 @@ async function openLlmRun(id) {
   box.appendChild(el('pre', 'llm-json', JSON.stringify({
     model: req.model, stream: req.stream, params: req.params,
     usage: run.usage, missing: res.missing || [],
+    format_ok: res.format_ok, markers: res.markers || [],
+    raw_chars: res.raw_chars, stray_chars: res.stray_chars, bad_chunks: res.bad_chunks,
+    image_count: req.image_count, image_bytes: req.image_bytes,
   }, null, 2)));
   confirmModal('LLM 调用记录 ' + run.id, box, '下载 JSON', () => {
     const blob = new Blob([JSON.stringify(run, null, 2)], { type: 'application/json' });
@@ -1583,6 +1691,15 @@ async function openResult(jobId) {
   v.style.borderRadius = '10px';
   v.src = '/api/file?path=' + encodeURIComponent(r.output.wsl);
   b.appendChild(v);
+  // 网络慢、在这儿播放一直转圈时的出口：原样加密打包 + 传网盘，拿分享链接下载（画质不变）
+  const net = el('div', 'card-actions');
+  net.style.marginTop = '10px';
+  const up = el('button', 'ghost-btn sm', '☁ 加密打包上传到网盘');
+  up.onclick = () => { $('modal').hidden = true; useJobForDisk(jobId); };
+  net.appendChild(up);
+  const hint = el('span', 'muted tiny', '（在线播放卡的时候走这条路：速度由网盘决定，画质不变、内容加密）');
+  net.appendChild(hint);
+  b.appendChild(net);
   confirmModal('生成结果', b, '复制 Windows 路径', () => {
     navigator.clipboard.writeText(r.output.windows);
     toast('已复制：' + r.output.windows, 'ok', 6000);
@@ -1805,6 +1922,515 @@ function mdToHtml(md) {
   });
   closeList(); closeTable();
   return out.join('\n');
+}
+
+/* ------------------------------------------------------------------ 夸克网盘 */
+/* 与后端的分工：压缩/转码/加密/调 CLI 全在后端（backend/quark.py + pack.py），
+   这里只管「选产物 -> 勾选项 -> 提交 -> 看进度 -> 拿到分享链接和密码」。
+   网络慢的时候，这条链路的产物就是唯一能在别处高速下载的东西。 */
+const DISK_CAT = { 0: '文件夹', 1: '视频', 2: '音频', 3: '图片', 4: '文档', 5: '种子', 6: '其他', 7: '压缩包', 8: '应用' };
+
+function disk() {
+  if (!S.disk) {
+    S.disk = { status: null, tasks: [], files: [], parent: '0', stack: [],
+               streams: {}, timer: null, poll: null };
+  }
+  return S.disk;
+}
+
+function diskApi(path, opts) { return api(path, opts); }
+
+/* ---- 账号与环境 ---- */
+async function loadDiskStatus(fresh) {
+  const box = $('disk-env-kv');
+  const wantProbe = fresh !== false;
+  if (wantProbe) {
+    // 点进页签/点刷新时先摆明「正在查」，别让上一次的结论（甚至空状态）冒充当前状态
+    const b = $('disk-auth-badge');
+    b.textContent = '加载中…';
+    b.className = 'badge';
+    $('disk-login-box').hidden = true;
+  }
+  try {
+    const r = await diskApi('/api/disk/status?probe=' + (wantProbe ? '1' : '0') + '&tasks=20');
+    disk().status = r.disk;
+    renderDiskStatus(r.disk);
+    if (r.tasks) { disk().tasks = r.tasks; renderDiskTasks(); }
+  } catch (e) {
+    $('disk-auth-badge').textContent = '不可用';
+    $('disk-auth-badge').className = 'badge err';
+    box.innerHTML = '<div class="errbox tiny">' + esc(e.message) + '</div>';
+  }
+}
+
+function renderDiskStatus(d) {
+  if (!d) return;
+  const run = d.runner || {};
+  const kv = [
+    ['运行方式', (run.mode === 'windows' ? 'Windows node.exe（WSL interop）'
+      : run.mode === 'linux' ? 'WSL 内的 node' : '不可用') +
+      (run.node_version ? ' · ' + run.node_version : '')],
+    ['CLI', run.cli_ok ? (run.cli || '') : (run.reason || '不可用')],
+    ['压缩', (d.compress || {}).enabled
+      ? ('开 · CRF ' + (d.compress || {}).crf + ' / ' + (d.compress || {}).preset +
+         ' / 长边 ' + (d.compress || {}).max_edge + 'px')
+      : '关（原文件直接上传）'],
+    ['压缩包', (d.archive || {}).enabled
+      ? ('开 · 密码 ' + ((d.archive || {}).password ? '已设置' : '未设置!'))
+      : '关（不打包）'],
+    ['分享', (d.share || {}).enabled
+      ? (((d.share || {}).url_type === 2 ? '私密链接' : '公开链接') + ' · 有效期类型 ' + (d.share || {}).expired_type)
+      : '关'],
+    ['下载到', d.download_dir || '--'],
+  ];
+  $('disk-env-kv').innerHTML = kv.map(r =>
+    '<div>' + esc(r[0]) + '</div><div><code>' + esc(r[1]) + '</code></div>').join('');
+
+  const badge = $('disk-auth-badge');
+  const loginBox = $('disk-login-box');
+  // 三种状态必须分清：CLI 不可用 / 还没问过（加载中）/ 问过了（已授权 or 未授权）。
+  // 把「没问过」渲染成「未授权」是假的确定信息 —— 账号明明授权着，页面却喊你去登录。
+  const known = d.auth_known !== false && d.logged_in !== undefined && d.logged_in !== null;
+  const logged = d.logged_in === true;
+  if (run.cli_ok === false) {
+    badge.textContent = '不可用';
+    badge.className = 'badge err';
+  } else if (!known) {
+    badge.textContent = '加载中…';
+    badge.className = 'badge';
+  } else {
+    badge.textContent = logged ? '已授权' : '未授权';
+    badge.className = 'badge ' + (logged ? 'ok' : 'warn');
+  }
+  loginBox.hidden = !known || logged || run.cli_ok === false;
+  if (known && !logged && d.message) $('disk-login-msg').textContent = d.message;
+
+  const host = $('disk-env-kv');
+  const accRows = flattenDiskAccount(d.account);
+  if (logged && accRows.length) {
+    accRows.forEach(r => {
+      const div = document.createElement('div');
+      div.innerHTML = '<div>' + esc(r[0]) + '</div><div><code>' + esc(r[1]) + '</code></div>';
+      host.appendChild(div);
+    });
+  }
+}
+
+/* get-user-info 返回的是嵌套结构（实测：{vipInfo:{vipType,capacity,used}, userInfo:{nickname,…}}），
+   这里拍平 + 翻译成人话；认不出来的字段就按原名列出 —— 宁可显示得朴素，也别假装没有。 */
+const DISK_VIP_ZH = { NORMAL: '普通用户', VIP: '会员', SVIP: '超级会员', SUPER_VIP: '超级会员' };
+const DISK_ACC_LABEL = {
+  'userinfo.nickname': '昵称', nickname: '昵称', 'userinfo.userid': '账号 ID', userid: '账号 ID',
+  'vipinfo.viptype': '会员类型', viptype: '会员类型',
+  'vipinfo.capacity': '总容量', 'vipinfo.used': '已用', 'vipinfo.free': '剩余',
+  capacity: '总容量', used: '已用', free: '剩余',
+};
+const DISK_BYTES_KEY = /(capacity|used|free|size|space)/i;
+
+function flattenDiskAccount(acc) {
+  const out = [];
+  const walk = (o, pfx, depth) => {
+    if (!o || typeof o !== 'object' || depth > 2) return;
+    Object.keys(o).forEach(k => {
+      const v = o[k];
+      const key = (pfx ? pfx + '.' : '') + k;
+      if (v && typeof v === 'object') { walk(v, key, depth + 1); return; }
+      if (v === null || v === undefined || v === '' || Array.isArray(v)) return;
+      if (out.length >= 12) return;
+      let val = v;
+      if (typeof v === 'string' && DISK_VIP_ZH[v.toUpperCase()]) val = DISK_VIP_ZH[v.toUpperCase()];
+      else if (typeof v === 'number' && DISK_BYTES_KEY.test(k) && v > 1024 * 1024) val = fmtBytes(v);
+      const lk = key.toLowerCase();
+      out.push([DISK_ACC_LABEL[lk] || k, val]);
+    });
+  };
+  walk(acc, '', 0);
+  return out;
+}
+
+async function diskLogin(token) {
+  const busy = (disk().tasks || []).some(t => t.kind === 'login' && (t.status === 'running' || t.status === 'queued'));
+  if (busy) { toast('已经有一个登录任务在跑了，等它结束再点', 'warn', 4000); return; }
+  try {
+    const r = await diskApi('/api/disk/login', {
+      method: 'POST', body: JSON.stringify(token ? { token: token } : {}),
+    });
+    toast(token ? '授权码已提交，正在登录…' : '已发起浏览器授权，请在弹出的页面完成登录', 'info', 8000);
+    disk().tasks.unshift(r.task);
+    renderDiskTasks();
+    watchDiskTask(r.task.id);
+    selectView('disk');
+  } catch (e) { toast('发起授权失败：' + e.message, 'err'); }
+}
+
+/* ---- 任务 ---- */
+async function refreshDiskTasks() {
+  try {
+    const r = await diskApi('/api/disk/tasks?limit=20');
+    disk().tasks = r.tasks || [];
+    renderDiskTasks();
+    diskPolling(disk().tasks.some(t => t.status === 'running' || t.status === 'queued' || t.status === 'cancelling'));
+  } catch (e) { /* 忽略 */ }
+}
+
+function diskPolling(on) {
+  const d = disk();
+  if (on && !d.poll) d.poll = setInterval(refreshDiskTasks, 2000);
+  if (!on && d.poll) { clearInterval(d.poll); d.poll = null; }
+}
+
+function renderDiskTasks() {
+  const host = $('disk-tasks');
+  if (!host) return;
+  const list = disk().tasks || [];
+  host.innerHTML = '';
+  if (!list.length) {
+    host.appendChild(el('div', 'muted tiny', '还没有网盘任务。上面选好产物点「开始打包并上传」。'));
+    return;
+  }
+  list.forEach(t => host.appendChild(diskTaskCard(t)));
+}
+
+function diskTaskCard(t) {
+  const box = el('div', 'dtask');
+  box.id = 'dtask-' + t.id;
+  const head = el('div', 'dhead');
+  head.appendChild(el('span', 'status-dot ' + (t.status === 'done' ? 'done' : t.status === 'failed' ? 'failed'
+    : t.status === 'cancelled' ? 'cancelled' : t.status === 'queued' ? 'queued' : 'running')));
+  head.appendChild(el('b', null, t.kind_zh || t.kind));
+  head.appendChild(el('span', 'muted tiny', t.stage_zh || t.stage));
+  head.appendChild(el('span', 'sp', fmtDur(t.elapsed_s)));
+  head.appendChild(el('span', 'muted tiny', t.id));
+  box.appendChild(head);
+
+  const bar = el('div', 'dbar');
+  const fill = el('i');
+  fill.style.width = Math.round((t.progress || 0) * 100) + '%';
+  bar.appendChild(fill);
+  box.appendChild(bar);
+
+  const meta = el('div', 'dmeta');
+  meta.appendChild(el('span', null, Math.round((t.progress || 0) * 100) + '%'));
+  if (t.message) meta.appendChild(el('span', null, t.message));
+  if (t.params && t.params.path) meta.appendChild(el('span', null, String(t.params.path).split(/[\\/]/).pop()));
+  box.appendChild(meta);
+  if (t.error) {
+    const e = el('div', 'errbox tiny');
+    e.textContent = t.error;
+    box.appendChild(e);
+  }
+  if (t.need_login) {
+    const w = el('div', 'warnbox tiny', '网盘还没授权：先在上面点「浏览器授权登录」，授权完成后重新提交。');
+    box.appendChild(w);
+  } else if (t.status === 'failed' && t.kind === 'login') {
+    const w = el('div', 'warnbox tiny', '这次登录没成功。若你其实已经授权，刷新一下账号状态即可；'
+      + '要换账号得先解绑（见下面的说明）。');
+    box.appendChild(w);
+  }
+
+  /* 结果：分享链接 + 密码，是这个功能真正要交付的东西 */
+  const res = t.result || {};
+  const share = res.share || {};
+  const up = res.upload || {};
+  if (t.status === 'done' && t.kind === 'login' && (res.msg || t.message)) {
+    // 授权这类结果必须原样展示 CLI 的话：比如 -118 的「你已授权夸克网盘账号（xxx）」
+    const b2 = el('div', 'dres');
+    b2.appendChild(el('div', 'tiny', res.msg || t.message));
+    box.appendChild(b2);
+  }
+  if (t.status === 'done' && (share.url || up.fid || res.files)) {
+    const box2 = el('div', 'dres');
+    const rows = [];
+    if (share.url) {
+      rows.push(['分享链接', '<a href="' + esc(share.url) + '" target="_blank" rel="noreferrer">' + esc(share.url) + '</a>']);
+      if (share.passcode) rows.push(['夸克提取码', '<code>' + esc(share.passcode) + '</code>']);
+    }
+    if (res.archive_password) rows.push(['压缩包密码', '<code>' + esc(res.archive_password) + '</code>']);
+    if (up.file) rows.push(['网盘文件', esc(up.file) + (up.bytes ? '（' + fmtBytes(up.bytes) + '）' : '')]);
+    if (up.full_path) rows.push(['网盘位置', esc(up.full_path)]);
+    if (res.local && res.local.windows) rows.push(['本机文件', '<code>' + esc(res.local.windows) + '</code>']);
+    if (res.dir) rows.push(['下载目录', '<code>' + esc(res.windows || res.dir) + '</code>']);
+    if (res.files && res.files.length) rows.push(['已下载', esc(res.files.map(f => String(f).split(/[\\/]/).pop()).join('、'))]);
+    box2.innerHTML = '<div class="kv">' + rows.map(r => '<div>' + r[0] + '</div><div>' + r[1] + '</div>').join('') + '</div>';
+    box.appendChild(box2);
+  }
+
+  const ops = el('div', 'gops');
+  if (share.url) {
+    const cp = el('button', null, '复制分享链接');
+    cp.onclick = () => {
+      navigator.clipboard.writeText(share.url + (share.passcode ? ' 提取码：' + share.passcode : '')
+        + (res.archive_password ? ' 压缩包密码：' + res.archive_password : ''))
+        .then(() => toast('已复制分享链接与密码', 'ok', 3000))
+        .catch(() => toast('复制失败，请手动选择', 'err'));
+    };
+    ops.appendChild(cp);
+  }
+  if (t.status === 'running' || t.status === 'queued') {
+    const c = el('button', null, '取消');
+    c.onclick = async () => {
+      const r = await diskApi('/api/disk/tasks/' + t.id + '/cancel', { method: 'POST' })
+        .catch(e => ({ message: e.message }));
+      toast(r.message || '已请求取消', 'info');
+      refreshDiskTasks();
+    };
+    ops.appendChild(c);
+  }
+  const logBtn = el('button', null, '看日志');
+  logBtn.onclick = () => watchDiskTask(t.id, true);
+  ops.appendChild(logBtn);
+  box.appendChild(ops);
+
+  const pre = el('pre', 'log mono tiny');
+  pre.id = 'dtask-log-' + t.id;
+  pre.hidden = true;
+  box.appendChild(pre);
+  return box;
+}
+
+/* CLI 的授权链接混在普通日志行里：把它单独拎出来做成可点链接，
+   否则用户只能从日志里手动框选复制（浏览器没自动弹出时，这一步是必须的）。 */
+function noteDiskUrl(id, line) {
+  const m = String(line || '').match(/https?:\/\/[^\s"'<>]+/);
+  if (!m) return;
+  const box = $('dtask-' + id);
+  if (!box) return;
+  let host = box.querySelector('.dlinks');
+  if (!host) {
+    host = el('div', 'dlinks tiny');
+    host.style.marginTop = '6px';
+    box.appendChild(host);
+  }
+  if (host.dataset.url === m[0]) return;
+  host.dataset.url = m[0];
+  host.innerHTML = '';
+  host.appendChild(el('span', 'muted', '需要手动打开时：'));
+  const a = document.createElement('a');
+  a.href = m[0];
+  a.target = '_blank';
+  a.rel = 'noreferrer';
+  a.textContent = m[0];
+  host.appendChild(a);
+}
+
+function watchDiskTask(id, showLog) {
+  const pre = $('dtask-log-' + id);
+  if (pre && showLog) pre.hidden = false;
+  const d = disk();
+  if (d.streams[id]) return;
+  if (!window.EventSource) return;
+  const es = new EventSource('/api/disk/tasks/' + id + '/stream?from=0');
+  d.streams[id] = es;
+  const push = (line) => {
+    const p = $('dtask-log-' + id);
+    if (!p) return;
+    p.hidden = false;
+    p.textContent += line + '\n';
+    if (p.textContent.length > 20000) p.textContent = p.textContent.slice(-15000);
+    p.scrollTop = p.scrollHeight;
+  };
+  const on = (name) => (e) => {
+    let o = {};
+    try { o = JSON.parse(e.data); } catch (err) { /* 忽略 */ }
+    if (name === 'log') { const ln = o.line || ''; push('  ' + ln); noteDiskUrl(id, ln); return; }
+    if (name === 'stage') push('▸ [' + (o.stage_zh || o.stage) + '] ' + (o.info || ''));
+    else if (name === 'cli') push('$ quark-drive ' + (o.args || []).join(' '));
+    else if (name === 'progress') push('  ' + (o.percent === undefined || o.percent === null ? '' : o.percent + '% ') + (o.text || ''));
+    else if (name === 'message') push('  ' + o.message);
+    else if (name === 'warn') push('! ' + o.message);
+    else if (name === 'error') push('✗ ' + o.message);
+    else if (name === 'compressed') push('重新编码（有损）：' + o.text);
+    else if (name === 'archived') push('打包：' + o.text + ' → ' + String(o.path || '').split(/[\\/]/).pop()
+      + (o.tool ? '（' + o.tool + '）' : ''));
+    else if (name === 'uploaded') push('上传完成：' + (o.file || '') + '（' + fmtBytes(o.bytes) + '）');
+    else if (name === 'share') push('分享链接：' + (o.url || ''));
+    else if (name === 'downloaded') push('已下载：' + (o.files || []).join('、'));
+    else if (name === 'exit') {
+      push('—— 任务结束：' + o.status + (o.error ? ' — ' + o.error : ''));
+      es.close();
+      delete disk().streams[id];
+      refreshDiskTasks();
+      loadDiskStatus(true);
+    }
+  };
+  ['log', 'stage', 'cli', 'progress', 'message', 'warn', 'error', 'compressed', 'archived',
+   'uploaded', 'share', 'downloaded', 'exit'].forEach(n => es.addEventListener(n, on(n)));
+}
+
+/* ---- 发布 ---- */
+function fillDiskSources() {
+  const sel = $('disk-source');
+  if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = '';
+  const opt0 = document.createElement('option');
+  opt0.value = '';
+  opt0.textContent = '（用下面的路径）';
+  sel.appendChild(opt0);
+  const done = (S.jobs || []).filter(j => j.status === 'done' && j.result && j.result.out);
+  done.slice(0, 30).forEach(j => {
+    const o = document.createElement('option');
+    o.value = j.id;
+    const r = j.request || {};
+    o.textContent = (r.width ? r.width + '×' + r.height + '×' + r.num_frames + 'f · ' : '')
+      + (r.prompt_excerpt || j.id).slice(0, 40) + ' · ' + (String(j.result.out).split('/').pop());
+    sel.appendChild(o);
+  });
+  if (keep) sel.value = keep;
+}
+
+async function diskPublish() {
+  const d = disk();
+  const jobId = $('disk-source').value;
+  const path = $('disk-path').value.trim();
+  if (!jobId && !path) { toast('先选一个产物，或填一个文件路径', 'warn'); return; }
+  const body = {
+    job_id: jobId || '',
+    path: path || '',
+    compress: $('disk-opt-compress').checked,
+    archive: $('disk-opt-archive').checked,
+    share: $('disk-opt-share').checked,
+    password: $('disk-opt-password').value.trim(),
+    title: $('disk-opt-title').value.trim(),
+    url_type: Number($('disk-opt-urltype').value),
+    expired_type: Number($('disk-opt-expired').value),
+    session_input: '把生成好的视频压缩打包上传到夸克网盘并给出分享链接',
+  };
+  try {
+    const r = await diskApi('/api/disk/publish', { method: 'POST', body: JSON.stringify(body) });
+    d.tasks.unshift(r.task);
+    renderDiskTasks();
+    watchDiskTask(r.task.id);
+    diskPolling(true);
+    toast('已提交：打包加密 → 上传 → 分享（不重新编码，画质不变）', 'ok', 5600);
+  } catch (e) {
+    toast('提交失败：' + e.message, 'err', 8000);
+  }
+}
+
+function applyDiskConfig(d) {
+  if (!d) return;
+  const c = d.compress || {}, a = d.archive || {}, s = d.share || {};
+  $('disk-opt-compress').checked = !!c.enabled;
+  $('disk-opt-crf').value = c.crf === undefined ? 26 : c.crf;
+  $('disk-opt-archive').checked = a.enabled !== false;
+  $('disk-opt-password').value = a.password || '123456';
+  $('disk-opt-share').checked = s.enabled !== false;
+  $('disk-opt-urltype').value = String(s.url_type || 1);
+  $('disk-opt-expired').value = String(s.expired_type || 1);
+  $('disk-opt-title').value = s.title || '';
+  $('disk-publish-summary').textContent = (a.enabled !== false ? '加密打包 + ' : '') + '上传' +
+    (s.enabled !== false ? ' + 分享' : '') + (c.enabled ? ' + 重新编码' : '（原画质）');
+  $('disk-publish-hint').textContent = c.enabled
+    ? '重新编码：CRF ' + c.crf + ' / ' + c.preset + ' / 最长边 ' + c.max_edge + 'px（有损，来自 config/quark.yaml）'
+    : '不重新编码：上传的就是原件，画质不变；压缩包只做加密（config/quark.yaml 的 archive）';
+  if (d.enabled === false) {
+    $('disk-publish-hint').textContent = 'config/quark.yaml 里 enabled=false，网盘功能已关闭';
+  }
+}
+
+/* ---- 网盘文件：浏览 / 搜索 / 下载回本机 ---- */
+async function diskBrowse(parent, all) {
+  const d = disk();
+  const q = '?parent_fid=' + encodeURIComponent(parent) + '&page_size=100' + (all ? '&all=1' : '');
+  $('disk-crumb').textContent = '加载中…';
+  try {
+    const r = await diskApi('/api/disk/files' + q);
+    d.parent = parent;
+    renderDiskFiles(r.files || [], r);
+    $('disk-crumb').textContent = '目录 FID ' + parent + ' · ' + (r.files || []).length + ' 项'
+      + (r.has_more ? '（还有下一页，点「加载全部」）' : '') + ' · 点文件夹进入，点「下载」把文件取回本机';
+    if (r.artifact) d.artifact = r.artifact;
+  } catch (e) {
+    $('disk-crumb').textContent = '加载失败';
+    toast('浏览失败：' + e.message + (String(e.message).indexOf('未登录') >= 0 ||
+      String(e.message).indexOf('授权') >= 0 ? '（先在上面完成授权）' : ''), 'err', 9000);
+  }
+}
+
+async function diskSearch() {
+  const kw = $('disk-search').value.trim();
+  if (!kw) { toast('先填关键词', 'warn'); return; }
+  $('disk-crumb').textContent = '搜索「' + kw + '」…';
+  try {
+    const r = await diskApi('/api/disk/search?keyword=' + encodeURIComponent(kw));
+    renderDiskFiles(r.files || [], r);
+    $('disk-crumb').textContent = '搜索「' + kw + '」：' + (r.files || []).length + ' 条'
+      + (r.total && r.total > (r.files || []).length ? '（共 ' + r.total + ' 条，已展示前 ' + (r.files || []).length + ' 条）' : '');
+  } catch (e) {
+    $('disk-crumb').textContent = '搜索失败';
+    toast('搜索失败：' + e.message, 'err', 9000);
+  }
+}
+
+function renderDiskFiles(files, r) {
+  const tb = $('disk-files').querySelector('tbody');
+  tb.innerHTML = '';
+  if (!files.length) {
+    const tr = document.createElement('tr');
+    const td = el('td', 'muted', '（空）');
+    td.colSpan = 5;
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+  files.forEach(f => {
+    const tr = document.createElement('tr');
+    const tdName = el('td');
+    const nameBox = el('div', 'disk-file-name' + (f.is_dir ? ' dir' : ''));
+    nameBox.appendChild(el('span', null, f.is_dir ? '📁' : '📄'));
+    nameBox.appendChild(el('span', null, f.name || f.fid));
+    if (f.is_dir) nameBox.onclick = () => { disk().stack.push(disk().parent); diskBrowse(f.fid); };
+    tdName.appendChild(nameBox);
+    tr.appendChild(tdName);
+    tr.appendChild(el('td', null, f.is_dir
+      ? (f.include_items ? f.include_items + ' 个文件' : '—') : fmtBytes(f.size)));
+    tr.appendChild(el('td', null, f.category_zh || DISK_CAT[f.category] || '文件'));
+    tr.appendChild(el('td', null, f.updated_at ? fmtClock(new Date(Number(f.updated_at)).toISOString())
+      : (f.duration ? f.duration + 's' : '—')));
+    const tdOp = el('td');
+    const ops = el('div', 'disk-file-actions');
+    if (f.is_dir) {
+      const b = el('button', 'ghost-btn sm', '进入');
+      b.onclick = () => { disk().stack.push(disk().parent); diskBrowse(f.fid); };
+      ops.appendChild(b);
+    } else {
+      const b = el('button', 'ghost-btn sm', '下载到本机');
+      b.onclick = () => diskFetch(f);
+      ops.appendChild(b);
+    }
+    tdOp.appendChild(ops);
+    tr.appendChild(tdOp);
+    tb.appendChild(tr);
+  });
+  const crumb = $('disk-crumb');
+  const all = el('button', 'ghost-btn sm', '加载全部');
+  all.style.marginLeft = '8px';
+  all.onclick = () => diskBrowse(disk().parent, true);
+  if (r && r.has_more) crumb.appendChild(all);
+}
+
+async function diskFetch(f) {
+  try {
+    const r = await diskApi('/api/disk/fetch', {
+      method: 'POST',
+      body: JSON.stringify({ fid: f.fid, name: f.name,
+        session_input: '把网盘里的文件下载到本机当参考素材' }),
+    });
+    disk().tasks.unshift(r.task);
+    renderDiskTasks();
+    watchDiskTask(r.task.id);
+    diskPolling(true);
+    toast('已开始下载：' + f.name + '（完成后在任务卡里看路径）', 'ok', 6000);
+  } catch (e) { toast('下载提交失败：' + e.message, 'err', 8000); }
+}
+
+function useJobForDisk(jobId) {
+  selectView('disk');
+  fillDiskSources();
+  $('disk-source').value = jobId;
+  $('disk-path').value = '';
+  $('disk-publish-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  toast('已选好产物，点「开始打包并上传」', 'info', 4000);
 }
 
 /* ------------------------------------------------------------------ 本地草稿 */

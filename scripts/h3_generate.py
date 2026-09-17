@@ -81,6 +81,38 @@ def log(msg):
 BENCH = {}
 
 
+# --------------------------------------------------------------------------- progress
+# Structured progress for the web UI (webui/).  Deliberately the *only* hook this
+# script carries for the front end, and it is self-contained: one env var in, one
+# prefixed JSON line out.  Nothing here changes what the run computes.
+#
+#   H3_PROGRESS_JSONL=/path/to/events.jsonl python3 scripts/h3_generate.py ...
+#
+# The line format is  "@@H3@@ {json}"  on stdout, so a terminal run stays readable
+# and a pipe reader can filter on the prefix.  If the env var is absent every call
+# is a single attribute lookup on None: zero effect on the existing workflow.
+PROGRESS_PREFIX = "@@H3@@ "
+PROGRESS_PATH = os.environ.get("H3_PROGRESS_JSONL") or None
+T_START = time.time()
+
+
+def report(etype, **fields):
+    """Emit one structured progress event (no-op unless H3_PROGRESS_JSONL is set)."""
+    if not PROGRESS_PATH:
+        return
+    rec = {"type": etype, "t": round(time.time() - T_START, 3)}
+    for k, v in fields.items():
+        if v is None or isinstance(v, (str, int, float, bool)):
+            rec[k] = v
+        else:
+            rec[k] = str(v)
+    print(PROGRESS_PREFIX + json.dumps(rec, ensure_ascii=False), flush=True)
+    # 不往 PROGRESS_PATH 写文件：那是服务端自己的事件落盘路径，
+    # 由它读 stdout 统一处理（见 webui/backend/jobs.py 的 _reader），
+    # 这里再写一遍只会让同一条事件落两次。
+
+
+
 def timeit(name):
     """Context manager: record the wall time of one stage under BENCH[name]."""
     import contextlib
@@ -530,14 +562,22 @@ def timed_progress(steps, state):
                 BENCH["step_s_last"] = round(now - last[0], 2)
                 BENCH["step_s_mean"] = round((now - t0[0]) / i, 2)
             last[0] = now
-            if i > 0 and not state.get("quiet"):
+            if i > 0:
                 dt = (now - t0[0]) / i
                 alloc = torch.cuda.memory_allocated() / 1024 ** 3
                 reserved = torch.cuda.memory_reserved() / 1024 ** 3
                 peak = torch.cuda.max_memory_allocated() / 1024 ** 3
-                print(f"    step {i:3d}/{steps}  {dt:6.2f} s/step  eta {(steps-i)*dt/60:5.1f} min"
-                      f"  alloc {alloc:4.2f}  reserved {reserved:4.2f}  peak {peak:4.2f} GiB",
-                      flush=True)
+                if not state.get("quiet"):
+                    print(f"    step {i:3d}/{steps}  {dt:6.2f} s/step  eta {(steps-i)*dt/60:5.1f} min"
+                          f"  alloc {alloc:4.2f}  reserved {reserved:4.2f}  peak {peak:4.2f} GiB",
+                          flush=True)
+                # i == number of *finished* steps: this callback runs when the
+                # pipeline pulls the next entry, i.e. after the previous step.
+                report("step", i=i, total=steps, s_step=round(dt, 2),
+                       s_last=round(now - last[0], 2) if i > 1 else None,
+                       alloc_gib=round(alloc, 2), reserved_gib=round(reserved, 2),
+                       peak_vram_gib=round(peak, 2),
+                       eta_s=round(max(0, steps - i) * dt, 1))
             yield x
     return factory
 
@@ -760,6 +800,7 @@ def main():
     misc.add_argument("--label", default=None, help="label for the --bench record")
     args = ap.parse_args()
 
+    report("stage", stage="prepare", info="解析参数与预设")
     plan = load_plan()
     resolved = plan.get("resolved", {})
     presets = plan.get("presets", {})
@@ -799,6 +840,12 @@ def main():
         prompt = open(args.prompt_file, encoding="utf-8").read().strip()
     edges = {"ref_image_short_edge": img_edge, "ref_video_short_edge": vid_edge,
              "ref_video_max_pixels": vid_maxpx}
+    report("stage", stage="prepare",
+           info=f"{width}x{height}x{num_frames}f, {steps} steps, seed {args.seed}")
+    report("shape", width=width, height=height, num_frames=num_frames, steps=steps,
+           seed=args.seed, seconds=round(num_frames / 24.0, 2),
+           preset=args.preset, refs=len(args.ref_specs or []),
+           lora=os.path.basename(args.lora) if args.lora else None)
 
     # ---- references --------------------------------------------------------
     # Decoded lazily: --dry-run only reports the resolved order, and --load-only
@@ -868,10 +915,16 @@ def main():
     if vram_limit is None:
         vram_limit = resolved.get("vram_limit_gib", 5.0)
     log(f"building pipeline (vram_limit={vram_limit:.2f} GiB, dit_onload={args.dit_onload})")
+    report("stage", stage="build",
+           info=f"vram_limit={vram_limit:.2f} GiB, dit_onload={args.dit_onload}, "
+                f"装载 {', '.join(need)}")
     t0 = time.perf_counter()
     pipe = build_pipeline(plan, need, vram_limit, dit_onload=args.dit_onload)
-    log(f"pipeline ready in {time.perf_counter()-t0:.1f} s"
+    build_s = time.perf_counter() - t0
+    log(f"pipeline ready in {build_s:.1f} s"
         f" (vram_management={pipe.vram_management_enabled})")
+    report("stage", stage="build", info=f"pipeline ready in {build_s:.1f} s",
+           budget_s=round(build_s, 1))
 
     if args.lora:
         log(f"hot-loading LoRA {os.path.basename(args.lora)}")
@@ -954,10 +1007,13 @@ def main():
 
     if need_encoder:
         log("running the text encoder (26 B params, streamed from disk)")
+        report("stage", stage="text", info="文本编码器前向（26 B 参数，从磁盘流式加载）")
         t0 = time.perf_counter()
         with timeit("text_encode_s"):
             embeds, tags = compute_text_embedding(pipe, prompt, references, height, width,
                                                   num_frames, edges)
+        report("stage", stage="text", info=f"done in {time.perf_counter()-t0:.1f} s",
+               budget_s=round(time.perf_counter() - t0, 1))
         log(f"text embedding done in {time.perf_counter()-t0:.1f} s"
             f" -> {tuple(embeds.shape)} embeds, vision tokens {(tags == 0).sum().item()}")
         if use_cache or args.cache_text_only:
@@ -980,6 +1036,9 @@ def main():
     prefer_sdpa_backend(backend)
     log(f"denoising: {width}x{height}x{num_frames}f, {steps} steps, seed {args.seed},"
         f" sdpa={args.sdpa_backend or 'auto'}")
+    report("stage", stage="denoise",
+           info=f"{width}x{height}x{num_frames}f, {steps} steps, seed {args.seed}, "
+                f"sdpa={args.sdpa_backend or 'auto'}")
     torch.cuda.reset_peak_memory_stats()
     t0 = time.perf_counter()
     _mark = {}
@@ -996,6 +1055,9 @@ def main():
         elif "video_vae" in names and "denoise_s" not in _mark:
             _mark["denoise_s"] = round(time.perf_counter() - t0, 2)
             _mark["_decode_t0"] = time.perf_counter()
+            report("stage", stage="decode",
+                   info=f"去噪完成 {_mark['denoise_s']} s，开始 VAE 解码与封装",
+                   budget_s=_mark["denoise_s"])
         return _orig_swap(self, names)
 
     _P.load_models_to_device = _counting_swap
@@ -1021,6 +1083,12 @@ def main():
     peak = torch.cuda.max_memory_allocated() / 1024 ** 3
     log(f"generation finished in {dt/60:.1f} min"
         f" ({dt/steps:.1f} s/step), peak VRAM {peak:.2f} GiB")
+    report("stage", stage="decode", info=f"生成完成，用时 {dt/60:.1f} min",
+           budget_s=round(dt, 1))
+    report("result", total_s=round(dt, 2), s_per_step=round(dt / steps, 2),
+           peak_vram_gib=round(peak, 2), frames=len(video),
+           seconds_out=round(len(video) / 24.0, 2), steps=steps, seed=args.seed,
+           width=width, height=height, num_frames=num_frames, out=args.out or "")
 
     if args.bench:
         BENCH.pop("_decode_t0", None)
@@ -1051,6 +1119,8 @@ def main():
     write_video_audio(video=video, audio=audio, output_path=out, fps=24,
                       audio_sample_rate=pipe.audio_vae.sample_rate)
     log(f"wrote {out}  ({len(video)} frames = {len(video)/24:.2f} s)")
+    report("result", out=out, frames=len(video), seconds_out=round(len(video) / 24.0, 2),
+           size_bytes=os.path.getsize(out) if os.path.exists(out) else None)
     if args.json:
         print(json.dumps({**summary, "seconds": dt, "output": out}, indent=2))
     return 0

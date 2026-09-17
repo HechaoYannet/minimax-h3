@@ -26,6 +26,19 @@
   POST /api/optimize                SSE：DeepSeek 提示词优化
   POST /api/upload                  上传参考素材 -> 返回 WSL 内路径
   POST /api/paths                   把 Windows 路径翻译成 WSL 路径并校验存在性
+
+夸克网盘（config/quark.yaml，见 backend/quark.py）：
+  GET  /api/disk/status             网盘 CLI / node / 授权状态（probe=0 只看缓存）
+  GET  /api/disk/files             浏览网盘目录（parent_fid / page_size / all）
+  GET  /api/disk/search            搜索网盘文件（keyword / size / search_type）
+  POST /api/disk/login             发起授权登录（不带 token 走浏览器 OAuth）
+  POST /api/disk/publish           压缩 + 加密打包 + 上传 + 建分享链接（长任务）
+  POST /api/disk/fetch             把网盘文件下载回本机（长任务）
+  GET  /api/disk/tasks             网盘任务列表
+  GET  /api/disk/tasks/<id>         单个任务
+  GET  /api/disk/tasks/<id>/stream  SSE：任务事件流
+  GET  /api/disk/tasks/<id>/log     任务原始输出尾部
+  POST /api/disk/tasks/<id>/cancel  取消任务
 """
 from __future__ import annotations
 
@@ -41,7 +54,9 @@ from urllib.parse import parse_qs, unquote, urlparse
 from . import config as cfgmod
 from .estimate import estimate, normalise_shape, risks
 from .jobs import JobManager, build_command, make_request
+from .pack import packer_state
 from .promptopt import Optimizer
+from .quark import DiskManager, QuarkError
 from .runlog import LEVEL_ORDER, LLMRunStore, RunLog
 from .telemetry import Telemetry
 from .util import (human_dur, iso, now, read_json, repo_root, tail_lines, wsl_to_windows,
@@ -101,6 +116,12 @@ class App:
             repo_root=self.root)
         self.jobs = JobManager(cfg, self.log)
         self.optimizer = Optimizer(self.log, self.llm_runs)
+        # 夸克网盘：CLI 调用 + 网盘任务（加密打包上传 / 下载回本机）
+        self.qcfg = cfgmod.quark_config()
+        self.disk = DiskManager(cfg, self.log, self.qcfg, self.root)
+        self.disk.jobs = self.jobs
+        self._disk_status = {"at": 0.0, "data": None}
+        self._disk_status_lock = threading.Lock()
         self.web_dir = os.path.join(self.root, "webui", "web")
         self.started = now()
         self._probe_cache: dict[str, dict] = {}
@@ -112,6 +133,53 @@ class App:
 
     def deepseek_cfg(self) -> dict:
         return cfgmod.deepseek_config()
+
+    # ---------------------------------------------------------------- 网盘
+    def disk_summary(self, fresh: bool = False) -> dict:
+        """网盘配置 + CLI 环境；fresh=True 时顺带真去问一次账号（有网络开销）。"""
+        q = self.qcfg
+        info = self.disk.cli.envprobe.detect(fresh=False)
+        out = {
+            # 有没有真的问过账号？没问过时前端要显示「加载中…」，
+            # 而不是把「不知道」渲染成「未授权」（那是假的确定信息）
+            "auth_known": False,
+            "enabled": bool(q.get("enabled", True)),
+            "runner": {"mode": info.get("mode"), "node": info.get("node"),
+                       "node_version": info.get("node_version"),
+                       "cli": info.get("cli"), "cli_ok": info.get("ok"),
+                       "reason": info.get("reason"), "wanted": info.get("runner_wanted")},
+            "compress": {k: v for k, v in (q.get("compress") or {}).items()},
+            "archive": {"enabled": (q.get("archive") or {}).get("enabled"),
+                        "password": (q.get("archive") or {}).get("password"),
+                        "level": (q.get("archive") or {}).get("level")},
+            "share": dict(q.get("share") or {}),
+            "upload": {"parent_fid": (q.get("upload") or {}).get("parent_fid") or "",
+                       "dir_name": (q.get("upload") or {}).get("dir_name") or ""},
+            # 打包实现的实际状态：没探过 / 探到哪个 bsdtar / 是否已降级 + 原因
+            "packer": packer_state(),
+            "download_dir": (q.get("download") or {}).get("dir"),
+            "keep_work": bool(q.get("keep_work", True)),
+            "session_id": self.disk.session_id,
+            "source": q.get("source"),
+        }
+        # probe=0：把「上次已知」的授权状态一起给出去（不发网络请求）
+        with self._disk_status_lock:
+            cached = self._disk_status.get("data")
+            warm = cached and (now() - self._disk_status["at"]) < 12
+        if cached:
+            out.update(cached)
+            out["auth_known"] = True
+        if not fresh or warm:
+            return out
+        probe = self.disk.cli.status_probe()
+        snap = {"logged_in": probe.get("logged_in"), "account": probe.get("account"),
+                "message": probe.get("message"), "need_login": probe.get("need_login")}
+        with self._disk_status_lock:
+            self._disk_status["at"] = now()
+            self._disk_status["data"] = snap
+        out.update(snap)
+        out["auth_known"] = True
+        return out
 
     def probe_media(self, path: str) -> dict:
         """用 ffprobe 读参考素材的真实尺寸/帧数/时长；拿不到就返回 available=False。"""
@@ -315,6 +383,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._static(path)
             else:
                 self.err(405, "不支持的方法")
+        except QuarkError as e:
+            # 网盘命令的业务失败：未授权给 401（前端据此直接顶出「去授权」），其余给 400
+            self._err_logged = e.need_login
+            if APP and not e.need_login:
+                APP.log.info(f"{method} {path} 网盘命令失败：{e}", source="http",
+                             event="disk.cli_failed", code=e.code)
+            self.err(401 if e.need_login else 400, str(e),
+                     need_login=bool(e.need_login), cli_code=e.code)
         except ValueError as e:
             tb = traceback.format_exc()
             self._err_logged = True
@@ -417,6 +493,41 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"ok": ok, "message": msg}, 200 if ok else 409)
             if action == "result" and method == "GET":
                 return self.api_result(j)
+        # ---- 夸克网盘
+        if seg == ["api", "disk", "status"] and method == "GET":
+            return self.api_disk_status(q)
+        if seg == ["api", "disk", "files"] and method == "GET":
+            return self.api_disk_files(q)
+        if seg == ["api", "disk", "search"] and method == "GET":
+            return self.api_disk_search(q)
+        if seg == ["api", "disk", "login"] and method == "POST":
+            return self.api_disk_login()
+        if seg == ["api", "disk", "publish"] and method == "POST":
+            return self.api_disk_publish()
+        if seg == ["api", "disk", "fetch"] and method == "POST":
+            return self.api_disk_fetch()
+        if seg == ["api", "disk", "tasks"] and method == "GET":
+            return self.json({"ok": True, "tasks": app.disk.list(_qint(q, "limit", 30)),
+                              "running": app.disk._running})
+        if len(seg) == 4 and seg[:3] == ["api", "disk", "tasks"] and method == "GET":
+            t = app.disk.get(seg[3])
+            if not t:
+                return self.err(404, "网盘任务不存在")
+            return self.json({"ok": True, "task": t.to_dict()})
+        if len(seg) == 5 and seg[:3] == ["api", "disk", "tasks"]:
+            tid, action = seg[3], seg[4]
+            t = app.disk.get(tid)
+            if not t:
+                return self.err(404, "网盘任务不存在")
+            if action == "stream" and method == "GET":
+                return self.stream_disk(t, _qint(q, "from", 0))
+            if action == "log" and method == "GET":
+                return self.json({"ok": True, "lines": tail_lines(t.paths["log"], _qint(q, "n", 300))})
+            if action == "cancel" and method == "POST":
+                ok, msg = app.disk.cancel(tid)
+                return self.json({"ok": ok, "message": msg}, 200 if ok else 409)
+            if action == "events" and method == "GET":
+                return self.json({"ok": True, "events": t.events_after(_qint(q, "from", 0))})
         if seg == ["api", "optimize"] and method == "POST":
             return self.api_optimize()
         if seg == ["api", "upload"] and method == "POST":
@@ -463,6 +574,21 @@ class Handler(BaseHTTPRequestHandler):
         gpu = app.telemetry.current().get("gpu") or {}
         checks.append({"name": "nvidia-smi", "ok": bool(gpu.get("ok")),
                        "detail": gpu.get("name") or gpu.get("error")})
+        # 夸克网盘：CLI 能不能跑（不发网络请求，授权状态在「网盘」页签看）
+        dinfo = app.disk_summary(fresh=False).get("runner") or {}
+        dq = app.qcfg
+        d_on = bool(dq.get("enabled", True))
+        checks.append({"name": "夸克网盘 CLI（加密打包上传 / 下载到本机）",
+                       "ok": (not d_on) or bool(dinfo.get("cli_ok")),
+                       "detail": ("已关闭（config/quark.yaml 的 enabled=false）" if not d_on else
+                                  (f"{dinfo.get('mode') or '?'} runner · {dinfo.get('node_version') or '?'}"
+                                   f" · {dinfo.get('cli')}" if dinfo.get("cli_ok")
+                                   else (dinfo.get("reason") or "不可用")))})
+        checks.append({"name": "ffmpeg（网盘上传前的视频压缩）",
+                       "ok": bool(ffm) or not ((dq.get("compress") or {}).get("enabled")),
+                       "detail": (ffm or "未找到")
+                       + ("；compress.enabled=true，缺 ffmpeg 时只打包不转码"
+                          if (dq.get("compress") or {}).get("enabled") else "；压缩已关闭")})
         lstats = app.log.stats()
         checks.append({"name": "运行日志（落盘）",
                        "ok": not (app.log.file_enabled and lstats.get("file_error")),
@@ -560,6 +686,8 @@ class Handler(BaseHTTPRequestHandler):
                 # 多模态附图配置（不含任何密钥），前端据此显示「附图 N 张」等提示
                 "multimodal": ds.get("multimodal") or {},
             },
+            # 夸克网盘：只给配置与本地环境探测，不发网络请求（真状态在 /api/disk/status）
+            "disk": app.disk_summary(fresh=False),
             "wsl": {"distro": os.environ.get("WSL_DISTRO_NAME"),
                     "repo_root": cfg["root"], "repo_windows": wsl_to_windows(cfg["root"])},
         })
@@ -877,6 +1005,187 @@ class Handler(BaseHTTPRequestHandler):
             app.log.error(f"优化失败：{e}")
             gen.sse("error", {"type": "error", "message": f"优化过程异常：{e}"})
 
+    # ---- 网盘端点
+    DISK_CATEGORY = {0: "文件夹", 1: "视频", 2: "音频", 3: "图片", 4: "文档",
+                     5: "种子", 6: "其他", 7: "压缩包", 8: "应用"}
+
+    @staticmethod
+    def _disk_file_item(it: dict) -> dict:
+        cat = it.get("category")
+        try:
+            cat = int(cat)
+        except (TypeError, ValueError):
+            cat = None
+        is_dir = str(it.get("file_type") or "") == "0" or cat == 0
+        return {
+            "fid": it.get("fid"), "name": it.get("filename") or it.get("file_name") or "",
+            "size": it.get("size"), "category": cat,
+            "category_zh": it.get("obj_category") or Handler.DISK_CATEGORY.get(cat, "文件"),
+            "is_dir": is_dir, "include_items": it.get("includeItems"),
+            "updated_at": it.get("updated_at"),
+            "duration": it.get("duration"), "video_width": it.get("video_width"),
+            "video_height": it.get("video_height"),
+            "thumbnail": it.get("big_thumbnail"),
+        }
+
+    def api_disk_status(self, q):
+        app = APP
+        assert app is not None
+        fresh = _q1(q, "probe", "1") not in ("0", "false", "no", "off")
+        data = app.disk_summary(fresh=fresh)
+        return self.json({"ok": True, "disk": data, "tasks": app.disk.list(_qint(q, "tasks", 10))})
+
+    def api_disk_files(self, q):
+        """浏览网盘目录。默认只取一页；all=1 时走 CLI 的 --all（生成完整 Artifact）。"""
+        app = APP
+        assert app is not None
+        parent = _q1(q, "parent_fid", "0") or "0"
+        size = max(1, min(100, _qint(q, "page_size", 100)))
+        fetch_all = _q1(q, "all", "0") in ("1", "true", "yes")
+        args = ["browse", "--parent-fid", parent, "--page-size", str(size)]
+        if fetch_all:
+            args.append("--all")
+        r = app.disk.cli.call(args, timeout=180)
+        files, artifact = [], None
+        for ev in r["events"]:
+            if ev.get("type") == "list":
+                d = ev.get("data") or {}
+                if d.get("fid"):
+                    files.append(self._disk_file_item(d))
+            elif ev.get("type") == "artifact":
+                artifact = (ev.get("data") or {}).get("file_path")
+        res = (r.get("result") or {}).get("data") or {}
+        if fetch_all and artifact:
+            files = [self._disk_file_item(x) for x in _read_artifact(artifact)] or files
+        return self.json({"ok": True, "parent_fid": parent, "files": files,
+                          "total": res.get("total", len(files)),
+                          "has_more": bool(res.get("hasMore")),
+                          "artifact": artifact, "all": fetch_all})
+
+    def api_disk_search(self, q):
+        """搜索网盘文件。完整结果在 CLI 的 Artifact（JSONL）里，这里读回前 N 条。"""
+        app = APP
+        assert app is not None
+        kw = (_q1(q, "keyword", "") or "").strip()
+        if not kw:
+            return self.err(400, "缺少 keyword")
+        args = ["search", "--keyword", kw[:50], "--size", str(max(1, min(100, _qint(q, "size", 100)))),
+                "--stdout-only"]
+        stype = _q1(q, "search_type", "")
+        if stype:
+            args += ["--search-type", stype]
+        parent = _q1(q, "parent_fid", "")
+        if parent:
+            args += ["--parent-fid", parent]
+        r = app.disk.cli.call(args, timeout=180)
+        files, artifact, preview = [], None, []
+        for ev in r["events"]:
+            if ev.get("type") == "list":
+                d = ev.get("data") or {}
+                if d.get("fid"):
+                    files.append(self._disk_file_item(d))
+            elif ev.get("type") == "artifact":
+                artifact = (ev.get("data") or {}).get("file_path")
+        res = (r.get("result") or {}).get("data") or {}
+        for x in (res.get("file_list") or []):
+            preview.append(self._disk_file_item(x))
+        if artifact:
+            # Artifact 是 CLI 落盘的绝对路径；Windows runner 下它是 D:\... 形式，这里翻回 WSL 视角
+            full = [self._disk_file_item(x) for x in _read_artifact(artifact)]
+            if full:
+                files = full
+        if not files:
+            files = preview
+        return self.json({"ok": True, "keyword": kw, "files": files[:300],
+                          "total": res.get("total", len(files)), "artifact": artifact})
+
+    def api_disk_login(self):
+        app = APP
+        assert app is not None
+        raw = self.json_body()
+        token = (raw.get("token") or "").strip()
+        t = app.disk.submit_login({"token": token, "timeout": raw.get("timeout") or 600})
+        return self.json({"ok": True, "task": t.to_dict()})
+
+    def api_disk_publish(self):
+        """压缩 + 加密打包 + 上传 + 建分享链接 —— 一次提交，走任务流看进度。"""
+        app = APP
+        assert app is not None
+        raw = self.json_body()
+        path = (raw.get("path") or "").strip()
+        job_id = (raw.get("job_id") or "").strip()
+        if not path and not job_id:
+            return self.err(400, "需要 path 或 job_id")
+        params = {
+            "path": translate_path(path) if path else "",
+            "job_id": job_id,
+            "compress": raw.get("compress"),
+            "archive": raw.get("archive"),
+            "share": raw.get("share"),
+            "password": (raw.get("password") or "").strip() or None,
+            "title": (raw.get("title") or "").strip() or None,
+            "parent_fid": (raw.get("parent_fid") or "").strip(),
+            "url_type": raw.get("url_type"),
+            "expired_type": raw.get("expired_type"),
+            "keep_work": raw.get("keep_work"),
+            "dry_run": bool(raw.get("dry_run")),
+            "session_input": (raw.get("session_input") or "").strip() or None,
+        }
+        # 没传的布尔项要落到配置默认值上；留个 None 进去会被 bool(None) 当成「显式关闭」
+        params = {k: v for k, v in params.items() if v is not None}
+        src = params["path"]
+        if src and not os.path.isfile(src):
+            return self.err(400, f"文件不存在：{src}")
+        t = app.disk.submit_publish(params)
+        return self.json({"ok": True, "task": t.to_dict()})
+
+    def api_disk_fetch(self):
+        """把网盘里的文件下载回本机（当参考素材用）。"""
+        app = APP
+        assert app is not None
+        raw = self.json_body()
+        fids = raw.get("fids") or ([raw["fid"]] if raw.get("fid") else [])
+        fids = [str(f).strip() for f in fids if str(f or "").strip()]
+        if not fids:
+            return self.err(400, "缺少 fid")
+        outdir = (raw.get("output_dir") or "").strip()
+        params = {"fids": fids, "name": (raw.get("name") or "").strip(),
+                  "output_dir": translate_path(outdir) if outdir else None,
+                  "session_input": (raw.get("session_input") or "").strip() or None}
+        t = app.disk.submit_fetch(params)
+        return self.json({"ok": True, "task": t.to_dict()})
+
+    # ---- SSE
+    def stream_disk(self, t, from_seq: int):
+        app = APP
+        assert app is not None
+        self.sse_start()
+        qq = t.subscribe()
+        try:
+            self.sse("snapshot", t.to_dict())
+            for ev in t.events_after(from_seq):
+                if not self.sse(ev.get("type") or "event", ev):
+                    return
+            last = time.time()
+            while True:
+                try:
+                    ev = qq.get(timeout=5)
+                except Exception:
+                    if t.status in ("done", "failed", "cancelled", "interrupted"):
+                        break
+                    if time.time() - last > 12:
+                        if not self.sse_ping():
+                            return
+                        last = time.time()
+                    continue
+                last = time.time()
+                if not self.sse(ev.get("type") or "event", ev):
+                    return
+                if ev.get("type") == "exit":
+                    break
+        finally:
+            t.unsubscribe(qq)
+
     # ---- SSE
     def stream_job(self, j, from_seq: int):
         app = APP
@@ -942,6 +1251,33 @@ class Handler(BaseHTTPRequestHandler):
                     return
         finally:
             app.log.unsubscribe(qq)
+
+
+# --------------------------------------------------------------------------- 网盘工具
+def _read_artifact(path: str, limit: int = 2000) -> list[dict]:
+    r"""读 CLI 落盘的完整结果（JSONL，一行一个文件对象）。读不到就当空结果。
+
+    Windows runner 下 CLI 写的是 D:... 路径，先翻成 /mnt/d/... 再读。
+    """
+    out: list[dict] = []
+    path = translate_path(path) or path
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict) and (obj.get("fid") or obj.get("filename")):
+                    out.append(obj)
+                if len(out) >= limit:
+                    break
+    except OSError:
+        return []
+    return out
 
 
 # --------------------------------------------------------------------------- 路径翻译

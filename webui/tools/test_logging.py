@@ -7,6 +7,8 @@
   2. LLMRunStore 完整记录、summary 模式不存正文、列举、按 id 取回、只保留 N 份
   3. 端到端      真起一次 HTTP 服务打 /api/logs 系列；再让 Optimizer 打本地
                  mock DeepSeek，验证 LLM 记录里确实有请求、输出、tokens、错误、中断
+  4. 格式失败    模型不按 <<<H3_*>>> 协议输出时，原始输出（response.raw）、标记之外
+                 的文字、见过的标记、未闭合的段都要能在记录里查到（否则无法排障）
 
 用法：
     cd <repo> && python3 webui/tools/test_logging.py -v
@@ -64,6 +66,24 @@ def _json_http(method, url, body=None):
         return status, json.loads(raw.decode("utf-8")), headers
     except Exception:
         return status, {"_raw": raw.decode("utf-8", "replace")}, headers
+
+
+def _sse_events(raw: str):
+    """把 /api/optimize 的 SSE 正文解析成 [(event, data), ...]。"""
+    out = []
+    for block in raw.split("\n\n"):
+        ev, data = "message", ""
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                ev = line[6:].strip()
+            elif line.startswith("data:"):
+                data += line[5:].strip()
+        if data:
+            try:
+                out.append((ev, json.loads(data)))
+            except json.JSONDecodeError:
+                continue
+    return out
 
 
 # --------------------------------------------------------------------------- RunLog
@@ -183,6 +203,47 @@ class LLMRunStoreTest(unittest.TestCase):
         self.assertEqual(full["response"]["thinking"], "想一想…")
         # 路径穿越要挡住
         self.assertIsNone(store.get("../secret"))
+
+    def test_raw_output_kept_when_model_ignores_the_format(self):
+        """模型没按标记协议输出时，记录里必须有它的原文，否则无从排查。"""
+        store = LLMRunStore(os.path.join(self.tmp.name, "llm-raw"), self.log,
+                            capture="full", max_runs=10)
+        run = store.begin({"model": "m"})
+        run.set_request({"model": "m", "stream": True}, "SYS", "USER")
+        prose = "当然可以！下面是我写的提示词：\nA woman stands in the rain."
+        run.note_raw(prose)
+        run.note_stray("当然可以！下面是我写的提示词：\n")
+        run.note_bad_chunk("<html>502 Bad Gateway</html>", "Expecting value")
+        summary = run.finish("ok", missing=["prompt", "translation", "notes"])
+
+        self.assertFalse(summary["format_ok"])
+        self.assertEqual(summary["markers"], [])          # 一个标记都没见到
+        self.assertEqual(summary["raw_chars"], len(prose))
+        self.assertEqual(summary["stray_chars"], len("当然可以！下面是我写的提示词：\n"))
+
+        full = store.get(run.id)
+        self.assertEqual(full["response"]["raw"], prose)   # 原文可回放
+        self.assertIn("A woman stands in the rain.", full["response"]["raw"])
+        self.assertIn("当然可以", full["response"]["stray"])
+        self.assertEqual(full["response"]["missing"],
+                         ["prompt", "translation", "notes"])
+        # 事件里也要能看见「流里有解析不了的行」（代理改写成 HTML 报错页的情形）
+        self.assertEqual(full["response"]["bad_chunks"], 1)
+        self.assertTrue(any(ev["kind"] == "bad_chunk" for ev in full["events"]))
+
+    def test_raw_chars_survive_summary_capture(self):
+        """summary 模式不存原文，但长度与标记要留着 —— 至少能判断格式对不对。"""
+        store = LLMRunStore(os.path.join(self.tmp.name, "llm-raw-sum"), self.log,
+                            capture="summary", max_runs=10)
+        run = store.begin({"model": "m"})
+        run.note_raw("没有任何标记的一段话")
+        run.note_marker("prompt")
+        summary = run.finish("ok", missing=["translation", "notes"])
+        self.assertEqual(summary["raw_chars"], len("没有任何标记的一段话"))
+        self.assertEqual(summary["markers"], ["prompt"])
+        data = store.get(run.id)
+        self.assertEqual(data["response"]["raw"], "")
+        self.assertEqual(data["response"]["raw_chars"], len("没有任何标记的一段话"))
 
     def test_summary_capture_keeps_sizes_not_text(self):
         store = LLMRunStore(os.path.join(self.tmp.name, "llm2"), self.log,
@@ -530,6 +591,39 @@ class OptimizeRouteTest(unittest.TestCase):
         self.assertNotIn("data_uri", att)
         self.assertNotIn("base64,", json.dumps(run, ensure_ascii=False))
 
+    def test_bad_format_is_retrievable_over_http(self):
+        """模型不按格式输出时，光看页面提示不够：要能顺着 run_id 取回原始输出。"""
+        mock_deepseek.H.mode = "prose"
+        self.addCleanup(setattr, mock_deepseek.H, "mode", "ok")
+        body = {"chinese": "雨夜的便利店门口", "width": 640, "height": 384,
+                "num_frames": 22, "steps": 4, "seed": 42, "refs": []}
+        req = urllib.request.Request(self.base + "/api/optimize",
+                                     data=json.dumps(body).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"},
+                                     method="POST")
+        with urllib.request.urlopen(req, timeout=20) as r:
+            events = _sse_events(r.read().decode("utf-8", "replace"))
+
+        done = [d for e, d in events if e == "done"][0]
+        self.assertFalse(done["format_ok"])
+        self.assertEqual(done["missing"], ["prompt", "translation", "notes"])
+        self.assertEqual(done["markers"], [])
+        self.assertGreater(done["raw_chars"], 50)          # 模型确实说了话
+
+        status, rec, _ = _json_http("GET", self.base + "/api/llm/runs/" + done["run_id"])
+        self.assertEqual(status, 200)
+        run = rec["run"]
+        self.assertIn("下面是我根据你的中文意图写的提示词", run["response"]["raw"])
+        self.assertIn("下面是我根据你的中文意图写的提示词", run["response"]["stray"])
+        self.assertFalse(run["format_ok"])
+        self.assertEqual(run["response"]["missing"],
+                         ["prompt", "translation", "notes"])
+        # 运行日志里按 event=llm.format 就能筛出这次格式失败
+        status, data, _ = _json_http("GET", self.base + "/api/logs?source=llm&q=llm.format")
+        self.assertEqual(status, 200)
+        self.assertTrue(any(r.get("event") == "llm.format" for r in data["records"]),
+                        "格式失败应当有一条 llm.format 告警")
+
 
 # --------------------------------------------------------------------------- LLM 端到端
 @unittest.skipIf(mock_deepseek is None, "mock_deepseek 不可用")
@@ -544,11 +638,16 @@ class OptimizerLoggingTest(unittest.TestCase):
         self.opt = promptopt.Optimizer(self.log, self.store)
         mock_deepseek.H.last_request = None
         mock_deepseek.H.requests = []
+        mock_deepseek.H.mode = "ok"
+        self.addCleanup(setattr, mock_deepseek.H, "mode", "ok")
         self.mock = mock_deepseek.ThreadingHTTPServer(("127.0.0.1", 0), mock_deepseek.H)
         self.addCleanup(self.mock.server_close)
         threading.Thread(target=self.mock.serve_forever, daemon=True).start()
         self.addCleanup(self.mock.shutdown)
         self._orig = cfgmod.deepseek_config
+        # 安全默认：忘了调 _patch() 的测试指向死端口、快速失败，
+        # 绝不能因为漏了一行就真的把请求发到线上 API。
+        self._patch(url="http://127.0.0.1:1/chat/completions")
 
     def tearDown(self):
         cfgmod.deepseek_config = self._orig
@@ -596,6 +695,49 @@ class OptimizerLoggingTest(unittest.TestCase):
         msgs = [r["event"] for r in self.log.tail(50, source="llm")]
         self.assertIn("llm.start", msgs)
         self.assertIn("llm.finish", msgs)
+
+    def test_format_failure_is_diagnosable_from_the_record(self):
+        """模型完全不按标记协议输出（自然语言 / 自作主张回 JSON）时，
+        记录里必须留下原文、见过的标记、以及一条 llm.format 告警。"""
+        self._patch()
+        for mode in ("prose", "json"):
+            with self.subTest(mode=mode):
+                mock_deepseek.H.mode = mode
+                events = list(self.opt.stream(self._req()))
+                self.addCleanup(setattr, mock_deepseek.H, "mode", "ok")
+                done = [e for e in events if e["type"] == "done"][0]
+                self.assertFalse(done["format_ok"])
+                self.assertEqual(done["missing"], ["prompt", "translation", "notes"])
+                self.assertEqual(done["markers"], [])
+                self.assertGreater(done["raw_chars"], 50, "模型确实输出了内容")
+
+                run = self.store.get(done["run_id"])
+                self.assertEqual(run["status"], "ok")          # 调用本身没失败
+                self.assertFalse(run["format_ok"])
+                self.assertEqual(run["response"]["markers"], [])
+                self.assertTrue(run["response"]["raw"], "原始输出必须落盘")
+                self.assertIn("下面是我根据你的中文意图写的提示词"
+                              if mode == "prose" else '"prompt"',
+                              run["response"]["raw"])
+                # 被解析器丢掉的标记外文字也要留着
+                self.assertGreater(run["response"]["stray_chars"], 0)
+                evs = [r["event"] for r in self.log.tail(80, source="llm")]
+                self.assertIn("llm.format", evs)
+
+    def test_unterminated_section_is_recovered(self):
+        """漏写结束标记时，正文不能凭空消失：按当前段收下 + 记一条 unterminated。"""
+        self._patch()
+        mock_deepseek.H.mode = "half"
+        self.addCleanup(setattr, mock_deepseek.H, "mode", "ok")
+        events = list(self.opt.stream(self._req()))
+        done = [e for e in events if e["type"] == "done"][0]
+        self.assertIn("[Shot 1]", done["result"])
+        self.assertEqual(done["missing"], ["translation", "notes"])
+        self.assertEqual(done["markers"], ["prompt"])
+        run = self.store.get(done["run_id"])
+        self.assertIn("[Shot 1]", run["response"]["sections"]["prompt"])
+        self.assertTrue(any(e["kind"] == "unterminated" for e in run["events"]),
+                        "缺少结束标记应当留下事件")
 
     def test_multimodal_attaches_images(self):
         path = os.path.join(self.tmp.name, "ref.png")

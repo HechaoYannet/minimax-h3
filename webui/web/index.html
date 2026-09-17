@@ -21,6 +21,7 @@
     <nav class="rail-nav">
       <button class="nav-item active" data-view="create"><i>✦</i>创作</button>
       <button class="nav-item" data-view="library"><i>▦</i>作品库</button>
+      <button class="nav-item" data-view="disk"><i>☁</i>网盘</button>
       <button class="nav-item" data-view="guide"><i>?</i>使用说明</button>
       <button class="nav-item" data-view="logs"><i>▤</i>运行日志</button>
       <button class="nav-item" data-view="about"><i>⚙</i>环境自检</button>
@@ -77,6 +78,9 @@
 
           <textarea id="prompt-input" rows="3"
             placeholder="用中文描述你想要的画面：谁、在哪里、做什么、镜头怎么动、有哪些声音。&#10;例：雨夜的便利店门口，一个穿蓝色外套的女孩把伞收起来走进门，镜头跟着她慢慢推进，能听到雨声和门上的风铃。"></textarea>
+
+          <!-- 本次生成到底用哪一份提示词（英文优化结果 / 中文原文）——必须一直可见 -->
+          <div class="optimize-status" id="prompt-use"></div>
 
           <div class="composer-bar">
             <div class="bar-left">
@@ -225,6 +229,115 @@
         </table></div>
       </section>
 
+      <!-- ---------------- 网盘（夸克） ---------------- -->
+      <section class="view" id="view-disk" hidden>
+        <h1>网盘</h1>
+        <div class="muted" id="disk-intro">
+          网络慢、视频在线播放一直转圈时，把产物<b>原样打包加密 → 传到夸克网盘</b>，再用分享链接下载：
+          速度走网盘，不占这台机器；内容加了密，网盘的自动抽检也扫不到里面是什么。
+          <b>默认不重新编码，画质一点不损失</b>。密码统一在 <code>config/quark.yaml</code>
+          里配（默认 123456），改完刷新页面即生效。
+        </div>
+
+        <!-- 账号 -->
+        <div class="card" id="disk-status-card">
+          <div class="card-head">
+            <div class="card-title">账号与环境</div>
+            <div class="card-actions">
+              <span class="badge" id="disk-auth-badge">加载中…</span>
+              <button class="ghost-btn sm" id="btn-disk-refresh">刷新</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="kv" id="disk-env-kv"></div>
+            <div id="disk-login-box" hidden>
+              <div class="warnbox" id="disk-login-msg"></div>
+              <div class="disk-form">
+                <button class="primary-btn" id="btn-disk-login">浏览器授权登录</button>
+                <label class="mini grow"><span>授权码</span>
+                  <input id="disk-token" placeholder="浏览器授权后，把跳转地址里 code= 后面那段粘贴到这里">
+                </label>
+                <button class="ghost-btn" id="btn-disk-login-token">用授权码登录</button>
+              </div>
+              <div class="muted tiny">
+                点「浏览器授权登录」会拉起夸克授权页并在后台等待；若浏览器没弹出或回调没被捕获，
+                把跳转地址里的 <code>code</code> 参数粘到上面用授权码登录。
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 发布 -->
+        <div class="card" id="disk-publish-card">
+          <div class="card-head">
+            <div class="card-title">加密打包上传到网盘</div>
+            <div class="card-summary" id="disk-publish-summary"></div>
+          </div>
+          <div class="card-body">
+            <div class="disk-form">
+              <label class="mini grow"><span>产物</span><select id="disk-source"></select></label>
+              <label class="mini grow"><span>或路径</span>
+                <input id="disk-path" placeholder="留空则用左边的产物；也可直接粘贴 D:\... 或 /mnt/d/...">
+              </label>
+            </div>
+            <div class="disk-form">
+              <label class="mini tiny"><input type="checkbox" id="disk-opt-archive" checked>
+                打包成加密 zip（内容加密，防网盘抽检）</label>
+              <label class="mini tiny"><input type="checkbox" id="disk-opt-compress">
+                重新编码压缩（<b>有损</b>，默认关；只在要省流量时才勾）</label>
+              <label class="mini"><span>CRF</span><input type="number" id="disk-opt-crf" min="0" max="51" step="1"></label>
+              <label class="mini"><span>压缩包密码</span><input id="disk-opt-password"></label>
+            </div>
+            <div class="disk-form">
+              <label class="mini tiny"><input type="checkbox" id="disk-opt-share" checked> 创建分享链接</label>
+              <label class="mini"><span>链接类型</span>
+                <select id="disk-opt-urltype">
+                  <option value="1">公开链接（拿到链接即可下载）</option>
+                  <option value="2">私密链接（夸克另发一个提取码）</option>
+                </select>
+              </label>
+              <label class="mini"><span>有效期</span>
+                <select id="disk-opt-expired">
+                  <option value="1">永久</option><option value="2">1 天</option>
+                  <option value="3">7 天</option><option value="4">30 天</option>
+                  <option value="5">60 天</option><option value="6">100 天</option>
+                  <option value="7">180 天</option>
+                </select>
+              </label>
+              <label class="mini grow"><span>分享标题</span><input id="disk-opt-title"></label>
+            </div>
+            <div class="card-actions">
+              <button class="primary-btn" id="btn-disk-publish">开始打包并上传</button>
+              <span class="muted tiny" id="disk-publish-hint"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 任务 -->
+        <div class="section-title-row">
+          <h2>网盘任务</h2>
+          <button class="ghost-btn sm" id="btn-disk-tasks-refresh">刷新</button>
+        </div>
+        <div class="muted tiny">上传/下载都在后台跑，关掉页面也不会中断；结果（分享链接与密码）留在下面这张列表里。</div>
+        <div id="disk-tasks" class="disk-tasks"></div>
+
+        <!-- 文件 -->
+        <div class="section-title-row">
+          <h2>网盘文件</h2>
+          <div class="disk-toolbar">
+            <input class="log-search" id="disk-search" placeholder="搜索网盘文件（关键词）…">
+            <button class="ghost-btn sm" id="btn-disk-search">搜索</button>
+            <button class="ghost-btn sm" id="btn-disk-root">根目录</button>
+            <button class="ghost-btn sm" id="btn-disk-up" title="返回上级目录">↑ 上级</button>
+          </div>
+        </div>
+        <div class="muted tiny" id="disk-crumb">未加载。点「根目录」开始浏览，或直接搜索；文件可以「下载到本机」当参考素材。</div>
+        <div class="table-wrap"><table class="tbl" id="disk-files">
+          <thead><tr><th>名称</th><th>大小</th><th>类型</th><th>修改时间</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </section>
+
       <!-- ---------------- 使用说明 ---------------- -->
       <section class="view" id="view-guide" hidden>
         <h1>使用说明</h1>
@@ -285,6 +398,8 @@
         <div class="muted tiny">
           每次「优化提示词」都会落一份完整记录（请求参数 / system / user / 流式输出 / 思考 /
           tokens / 耗时 / 报错），服务重启也不丢。点「详情」看全文，方便对着失败案例调提示词。
+          模型没按 <code>&lt;&lt;&lt;H3_*&gt;&gt;&gt;</code> 协议输出时，状态会标成
+          <code>ok·缺段</code>，详情里的「原始输出」就是模型原文（解析前的全文）。
         </div>
         <div class="table-wrap"><table class="tbl" id="llm-table">
           <thead><tr><th>时间</th><th>状态</th><th>模型</th><th>模式</th><th>tokens</th>

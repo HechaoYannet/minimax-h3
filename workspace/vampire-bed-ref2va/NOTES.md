@@ -67,3 +67,67 @@ cd /mnt/d/otherProject/minimax-h3
 | `outputs/` | 生成结果（待填） |
 | `quality/` | 步数扫档结果（待填） |
 | `NOTES.md` | 本文件 |
+
+
+---
+
+## 4. 续写片段（`vampire-bed-cont.mp4`）
+
+在第一段的**尾帧**上继续生成，采用 **I2VA 续接**方案：把 `outputs/vampire-bed-quick.mp4`
+的最后一帧抽成 `materials/last-frame.jpg`，作为第二段的 `<Picture 1>` 首帧锚点，画面完全对得上。
+
+### 抽帧命令
+
+```bash
+ffmpeg -sseof -0.05 -i outputs/vampire-bed-quick.mp4 -frames:v 1 materials/last-frame.jpg -y
+```
+
+### 复现命令
+
+```bash
+./run_h3.sh gen --preset standard \
+  --prompt-file workspace/vampire-bed-ref2va/prompt-cont.txt \
+  --ref-image workspace/vampire-bed-ref2va/materials/last-frame.jpg \
+  --num-frames 124 --steps 12 --ref-image-short-edge 256 \
+  --lora ~/source/minimax-h3/models/AfterMidnight_ref2va_h3_softer_rank64_v1.safetensors \
+  --out workspace/vampire-bed-ref2va/outputs/vampire-bed-cont.mp4
+```
+
+### 实测
+
+| 项 | 结果 |
+|---|---|
+| 输出 | 832x480 · 124 帧 · 5.175 s · h264 + aac 32 kHz 立体声 |
+| 耗时 | 文本编码 20.5 s → 去噪 **5.9 min**（29.6 s/step × 12）→ 解码封装 ~1 s |
+| 峰值显存 | 3.75 GiB / 7.93 GiB |
+| 文本嵌入 | 684 embeds / 114 vision tokens（比第一段的 1361 更轻，因为尾帧 vision token 更少） |
+| 验收 | `outputs/contact-cont.png`（抽帧）、`outputs/stitch-check.png`（尾帧 + 续写前 3 帧拼接对比） |
+
+### 提示词结构差异
+
+续写段用 **I2VA** 而非 Ref2VA：首行是
+`For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.`
+后接三段核心字段。`prompt-cont.txt` 里 Shot 1 从尾帧状态出发（同样的姿势、手部位置、光照），
+Shot 2 在 00:03.000 切近景收尾。
+
+### 备选方案（未跑）
+
+若需要严格的 `[video continuation]` 语义，可改用 Ref2VA + `<Video 1>` 标签，把整段
+`vampire-bed-quick.mp4` 作为参考视频喂入（`--ref-video`），代价是参考视频使序列长度接近翻倍，
+单次成本显著上升。本轮选择 I2VA 是为在观感无缝的前提下控制成本。
+
+### 两段汇总
+
+| 文件 | 时长 | 说明 |
+|---|---|---|
+| `outputs/vampire-bed-quick.mp4` | 5.175 s | 第一段（原参考图 Ref2VA，12 步） |
+| `outputs/vampire-bed-cont.mp4` | 5.175 s | 第二段（第一段尾帧 I2VA 续写，12 步） |
+
+两段连播合计 10.35 s。
+
+```bash
+# 直接拼成一条 10.35 s 的连续视频
+cd workspace/vampire-bed-ref2va
+printf "file 'outputs/vampire-bed-quick.mp4'\nfile 'outputs/vampire-bed-cont.mp4'\n" > /tmp/list.txt
+ffmpeg -f concat -safe 0 -i /tmp/list.txt -c copy outputs/vampire-bed-full.mp4 -y
+```

@@ -28,6 +28,20 @@ NOTES = """- 判断为 I2VA：只有一张参考图，按官方规范作为 0.00
 
 SECRET = "sk-mock-key"
 
+# 输出模式：用来离线复现「模型不按格式输出」这类失败。
+#   ok     正常三段（默认）
+#   prose  只写自然语言，一个 <<<H3_*>>> 标记都没有
+#   half   只有 prompt 段，且漏写结束标记
+#   json   自作主张回一个 JSON 对象（不是标记协议）
+MODES = ("ok", "prose", "half", "json")
+
+PROSE = """当然可以！下面是我根据你的中文意图写的提示词（直接给正文，没有用标记）：
+
+[Shot 1] Live-action, cinematic, a young woman in a blue cardigan stands under the awning
+of a convenience store at night, rain falling behind her. The camera pushes in slowly.
+
+如果还需要中文回译，我可以再补一段。"""
+
 
 def _content_parts(req: dict):
     """遍历 messages，返回所有 content 块（多模态时 user.content 是数组）。"""
@@ -58,11 +72,26 @@ def count_images(req: dict) -> tuple[int, int]:
     return n, total
 
 
+def compose(mode: str) -> str:
+    """按模式拼出「模型这一次的原始输出」。"""
+    if mode == "prose":
+        return PROSE
+    if mode == "half":
+        return "<<<H3_PROMPT>>>\n" + PROMPT + "\n"          # 故意不写结束标记
+    if mode == "json":
+        return json.dumps({"prompt": PROMPT, "translation": ZH, "notes": NOTES},
+                          ensure_ascii=False)
+    return ("<<<H3_PROMPT>>>\n" + PROMPT + "\n<<<END_H3_PROMPT>>>\n\n"
+            "<<<H3_ZH>>>\n" + ZH + "\n<<<END_H3_ZH>>>\n\n"
+            "<<<H3_NOTES>>>\n" + NOTES + "\n<<<END_H3_NOTES>>>\n")
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # 离线自测用：最后一次请求体、以及本次进程收到的所有请求体
     last_request = None
     requests = []
+    mode = "ok"          # 见 MODES：改成 prose/half/json 就复现格式失败
 
     def log_message(self, *a):
         pass
@@ -86,8 +115,8 @@ class H(BaseHTTPRequestHandler):
         H.last_request = req
         H.requests.append(req)
         n_img, img_bytes = count_images(req)
-        print("[mock] model=%s stream=%s thinking=%s msgs=%d images=%d img_bytes=%d"
-              % (req.get("model"), req.get("stream"),
+        print("[mock] mode=%s model=%s stream=%s thinking=%s msgs=%d images=%d img_bytes=%d"
+              % (H.mode, req.get("model"), req.get("stream"),
                  "reasoning_effort" in req or "thinking" in req,
                  len(req.get("messages") or []), n_img, img_bytes),
               flush=True)
@@ -107,9 +136,7 @@ class H(BaseHTTPRequestHandler):
 
         piece("先想一下结构…这个请求是单图首帧。", "reasoning_content")
         time.sleep(0.05)
-        full = ("<<<H3_PROMPT>>>\n" + PROMPT + "\n<<<END_H3_PROMPT>>>\n\n"
-                "<<<H3_ZH>>>\n" + ZH + "\n<<<END_H3_ZH>>>\n\n"
-                "<<<H3_NOTES>>>\n" + NOTES + "\n<<<END_H3_NOTES>>>\n")
+        full = compose(H.mode)
         step = 37
         for i in range(0, len(full), step):
             piece(full[i:i + step])
@@ -125,6 +152,9 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8799)
+    ap.add_argument("--mode", choices=MODES, default="ok",
+                    help="输出模式：ok 正常 / prose 不按标记 / half 漏结束标记 / json 换格式")
     a = ap.parse_args()
+    H.mode = a.mode
     print(f"[mock] DeepSeek 兼容端点在 http://127.0.0.1:{a.port}/chat/completions")
     ThreadingHTTPServer(("127.0.0.1", a.port), H).serve_forever()

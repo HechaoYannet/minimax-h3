@@ -445,7 +445,13 @@ workspace/<video-project-name>/  素材、提示词和输出视频存放地；�
 docker/                          容器化封装（§13）；镜像定义、构建/运行/打包脚本、中文说明
 docker/requirements.lock         WSL 环境 pip freeze 的逐行锁定（109 个包）
 docker/vendor/                   构建上下文产物（git 忽略）：DiffSynth 源码 tar + processor
-references/                      提示词准写准则（严格执行）                       
+references/                      提示词准写准则（严格执行）
+config/                          前端配置层（§13.6）：deepseek.yaml / server.yaml / prompts/
+webui/                           操作前端（§13.6）：后端 API + 静态页面 + 启动脚本
+web_disk/                        夸克网盘官方 CLI（§13.6 的「网盘」页签用它上传/下载）
+config/params.spec.json          前端参数规格（由 webui/tools/gen_params.py 生成）
+webui/tools/param_docs.py        参数中文文档的唯一来源（一句话/详细/经验/风险/取值语义）
+docs/PARAMETERS.md               参数参考手册（由 gen_params.py --write-docs 生成）
 ```
 
 ---
@@ -819,6 +825,108 @@ pwsh docker/run.ps1 check                            # 需要 27 GB 权重
 两个消费方都不读这个字段 —— `h3_generate.py:253` 与 `h3_validate.py:379` 分别只用
 `presets` 和由 `H3_MODELS` 现算的路径 —— 所以两边都不会因此出错。想让文件回到 WSL 版本：
 `git checkout -- cache/plan.json`。
+
+---
+
+## 13.6 操作前端：`webui/` + `config/`（仿即梦界面）
+
+给这套流水线加了一层操作界面：中文写意图 → DeepSeek 按 `references/` 的官方规范改写成结构化英文提示词 →
+调参数 → 提交生成 → 页面里看阶段/步数/ETA/显存/日志。**生成仍然走原来的 `run_h3.sh gen`，流水线行为未改。**
+
+```bash
+# WSL 终端里起后端（前台运行，Ctrl+C 停）
+cd /mnt/d/otherProject/minimax-h3 && python3 webui/serve.py
+
+# Windows 侧打开页面（后端已就绪就直接开浏览器）
+pwsh webui/start.ps1
+```
+
+### 13.6.1 解耦方式（三条边界）
+
+| 边界 | 契约 | 代价 |
+|---|---|---|
+| 浏览器 ↔ 后端 | REST + SSE（`/api/*`）；前端是三个静态文件，无构建步骤 | 删掉 `webui/web/` 后端照跑 |
+| 后端 ↔ 生成系统 | `subprocess` + `run_h3.sh` 命令行；后端**不 import torch / diffsynth** | 生成崩了只影响那个作业 |
+| 生成脚本 → 后端 | stdout 上一行 `@@H3@@ {json}`，由 `H3_PROGRESS_JSONL` 触发 | 不设该变量则**完全 no-op** |
+
+钩子只有约 25 行（`h3_generate.py` 的 `report()` 与若干个 `report(...)` 调用点）。
+已核对：`./run_h3.sh dry`、`--bench`、`--dry-run` 的输出与加钩子之前一致。
+
+**通信为什么不用端口转发**：`~/.wslconfig` 已经是 `networkingMode=Mirrored`，
+WSL 监听 `0.0.0.0:8765` 时 Windows 侧 `127.0.0.1:8765` 直接可达（实测 200）。
+后端只用标准库（`http.server` + `threading`，可选 PyYAML），常驻内存 < 60 MiB ——
+这台机器上每省 100 MiB 都是给 22.9 GiB 的内存配额让路。
+
+### 13.6.2 提示词优化：中文界面 + 英文规范怎么协调
+
+参考文档是**英文提示词规范**，使用者是中文用户，所以做成两段式：
+
+1. **中文进**：用户只写中文意图；参考素材清单（含 `<Picture n>` / `<Video n>` / `<Audio n>` 编号，
+   顺序即编号依据）与目标时长一并拼进 user message；
+2. **结构化英文出**：system prompt = `config/prompts/system.md` + 按参考素材自动挑选的结构规范
+   （`format-ref2va.md` 六段式 / `format-oneref.md` 关键帧 / `format-base.md` T2VA，
+   从 `references/*.md` 提炼的可配置摘要）；
+3. **中文回译**：模型被要求用三段标记输出 `<<<H3_PROMPT>>>`（送进流水线）/`<<<H3_ZH>>>`（给人核对）/
+   `<<<H3_NOTES>>>`（结构决策说明）。回译里结构字段名与标签保持英文原样，其余是中文。
+4. **提交用的是哪一份**：前端 `effectivePrompt()` 统一裁决 —— 优化结果新鲜（输入框自优化后没改过）就用
+   `<<<H3_PROMPT>>>` 那一段，否则回落中文原文；输入框下面一直显示「本次生成使用：…」。
+   优化后再改输入框会把它标成「已失效」（变黄），不会拿旧英文去生成。
+
+配置全在 `config/deepseek.yaml`（url / model_name / thinking + reasoning_effort / key / system_prompt 路径 /
+三种结构规范路径），**热读取**：改完刷新页面即可生效。
+
+**多模态**：`deepseek-flash` 能看图，所以参考图不再只是清单里的一行文件名 ——
+`multimodal` 开启时（默认）后端把本地参考图按服务端约束缩放/转码成 base64，
+以 OpenAI 兼容的 content 块数组（`{"type":"image_url","image_url":{"url":"data:...","detail":"high"}}`）
+附在 **user message** 上，模型据此对齐人物外貌 / 服装 / 配色 / 场景。
+实现只在 `webui/backend/media.py`（纯标准库按文件内容判格式 + 系统 ffmpeg 缩放/抽帧；
+认不出的格式先用 ffprobe 确认 codec 属于图片），任何一张图失败只记警告、不阻断优化。
+没有参考图时 content 仍是字符串，请求体与旧版逐字节一致；图片本体不进 LLM 调用记录，日志只记 `images=n`。
+
+### 13.6.3 参数与预估
+
+- 参数规格由 `webui/tools/gen_params.py` **从工程本体生成**（`cache/plan.json` 的预设 + `h3_generate.py`
+  的 argparse 定义），不存在第二份手写的平行副本；
+- **参数文案也只有一个源**：`webui/tools/param_docs.py`。每个参数都带「一句话 / 详细说明 / 经验与推荐 /
+  风险 / 取值语义表」，由 `gen_params.py --write-docs` 同时喂给三处 —— 页面参数卡片的「详细说明」折叠区、
+  页面「环境自检」里的完整参数手册、以及 [`docs/PARAMETERS.md`](docs/PARAMETERS.md)（约 480 行）。
+  漏写文档的参数会被 `params_undocumented` 列出来，新增参数不会静默没说明。
+- 序列长度复用 `scripts/h3_audit.py` 的算法（与框架 `PackedSequenceBuilder` 已对齐），
+  对 10 个预设逐项校验与 `plan.json` 的 `seq_len` **完全一致**；
+- 单步耗时用实测点做 log-log 插值并给出置信度标签，不用那套在实测面前差 65% 的解析公式；
+- 生成参数、质量（步数/参考边）、LoRA（文件 + α，自动切 beta 调度）、显存/内存/注意力后端、VAE 分块
+  全部可在页面上调，越界与非法形状在提交前就给出中文提示。
+
+### 13.6.4 进度、硬件与防呆
+
+- **进度**：阶段（`prepare → build → text → denoise → decode`）+ 逐步 `s/step` / ETA / 实测显存，
+  SSE 带 `seq`，断线可续传；
+- **硬件**：GPU 利用率/显存/温度/功耗/频率、WSL 内存与配额、swap、load、CPU 利用率、磁盘剩余、
+  显存占用进程，1.5 s 一个采样点并画曲线；
+- **防呆**：帧数下限抬到 22（实测 5 帧会在 VAE 解码处崩）、致命配置二次确认、
+  单作业串行排队、错误归因（把 `Failed to create GPU mapping` 翻成「这就是 OOM」并给 `wsl --shutdown` 建议）、
+  服务重启后清理上次残留的生成进程。
+
+### 13.6.5 网盘页签：网络慢的时候怎么把片子取走
+
+在线播放走的是 `/api/file`，看片的人不在本机时，这条链路要扛整段码流 —— 网络一慢就一直转圈。
+所以加了「网盘」页签：产物 **原样打包加密（密码统一 123456）→ 传到夸克网盘 → 给分享链接**，
+下载速度改由网盘决定，**画质一点不变**。套这层加密 zip 的目的是防网盘的内容抽检（顺带把
+「统一密码」落在压缩包上 —— 分享链接的提取码是服务端生成的，指定不了）。用的是 `web_disk/` 下
+夸克官方 CLI（Node 程序），反向也支持浏览/搜索网盘并把文件下载回 `workspace/netdisk/` 当参考素材。
+
+| 环节 | 做法 | 为什么 |
+|---|---|---|
+| 打包 | 纯标准库写的 ZipCrypto 加密 zip，**不重新编码** | 目的不是体积（mp4 套 zip 只省 1%），而是**内容加密防网盘抽检** |
+| 密码 | 密码统一在 `config/quark.yaml`（默认 123456） | 分享链接的提取码由服务端生成、调用方指定不了，只能落在压缩包上 |
+| 画质 | 默认不做 ffmpeg 转码（`compress.enabled: false`） | 重新编码是有损的；要省流量时再显式打开 |
+| node | 后端在 WSL，跑 Windows 侧的 `node.exe`（interop） | WSL 里没装 Node；环境变量经 `WSLENV` 过界，路径翻成 `D:\...` |
+| 长任务 | 后台线程 + 事件流（与生成作业同一套） | 上传要几分钟，不能占着 HTTP 线程 |
+
+两个反直觉的坑（都实测过）：CLI 认 agent 环境时**只给 `QK_AGENT_ID` 没用**，必须带 `DSH_HOME`/`DSH_SESSION_ID`；
+WSL 起 Windows 进程时环境变量**不会自动过界**，得登记进 `WSLENV`。
+设计与全部踩坑见 [`docs/QUARK.md`](docs/QUARK.md)，配置在 `config/quark.yaml`（热读取）。
+细节、协议与限制见 [`webui/README.md`](webui/README.md)；面向使用者的说明在页面「使用说明」页签。
 
 
 

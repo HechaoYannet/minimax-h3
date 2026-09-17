@@ -62,3 +62,30 @@ telemetry:
   nvidia_smi: "nvidia-smi"
   # 是否在页面上显示逐条系统日志
   expose_server_log: true
+
+# ============================================================================
+# 运行日志系统（webui/backend/runlog.py）
+# ----------------------------------------------------------------------------
+# 日志同时进两个地方：内存环形缓冲（页面实时流 / 过滤查询）与
+# cache/webui/logs/webui.jsonl（JSONL，按大小轮转，重启不丢，方便事后调试）。
+# 想看 LLM/作业的细节就把 level 调成 debug（页面「日志」页签里也能直接改）。
+# ============================================================================
+logging:
+  level: "info"            # debug | info | warn | error —— debug 会记每个 API 请求
+  capacity: 2000           # 内存里保留多少条（页面「最近」查询的来源）
+  console: true            # 是否同时打印到后端终端
+  file_enabled: true       # 是否落盘
+  dir: "cache/webui/logs"  # 相对仓库根；已加入 .gitignore（cache/webui/）
+  max_file_mb: 8           # 单个日志文件超过它就轮转
+  backups: 5               # 保留 webui.1.jsonl … webui.N.jsonl 的数量
+  max_field_chars: 4000    # 单条记录里每个附加字段的最大字符数
+  expose: true             # 是否向外提供 /api/logs 系列（本机单人工具默认为真）
+  # --- LLM 调用记录（每次「优化提示词」一份完整证据）---------------------
+  llm_enabled: true
+  # off    不记录
+  # summary 只记 token/耗时/状态，不存 system/user/输出全文
+  # full    请求、system、user、流式输出、模型原始输出(解析前)、思考、错误都存（推荐，方便调试）
+  #         原始输出是「模型没按 <<<H3_*>>> 协议输出」时唯一的现场，见 webui/README.md §8.4
+  llm_capture: "full"
+  llm_max_runs: 100        # 保留最近多少份，超出自动清理
+  llm_max_chars: 200000    # 单份记录里单个长文本字段的上限

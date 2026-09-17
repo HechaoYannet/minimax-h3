@@ -16,8 +16,9 @@ api:
   #   也可以写 https://api.deepseek.com/v1/chat/completions（v1 是兼容别名）
   #   自建/中转网关直接替换成自己的地址即可。
   url: "https://api.deepseek.com/chat/completions"
-  # 【key】API Key。留空则读取环境变量 DEEPSEEK_API_KEY。
+  # 【key】API Key。留空则读取下面的环境变量。
   key: ""
+  # 【key_env】环境变量的**名字**（不是 key 本身）；填错这里会表现为「没有配置 Key」。
   key_env: "DEEPSEEK_API_KEY"
   # 请求超时（秒）。思考模式下单次生成可能较慢，默认给得比较宽。
   timeout_s: 300
@@ -26,10 +27,10 @@ api:
 
 model:
   # 【model_name】模型名。官方可选：
-  #   deepseek-chat      —— 非思考模型，最快最便宜
-  #   deepseek-reasoner  —— 思考模型（旧别名）
+  #   deepseek-flash      —— deepseek v4.1 flash，最新旗舰模型
+  #   deepseek-v4-pro  —— 即将弃用
   #   也可直接写带版本号的模型名，例如 deepseek-v4
-  name: "deepseek-chat"
+  name: "deepseek-flash"
   # 【thinking】思考模式开关。参数名与取值随官方版本演进，这里显式列出，
   #   不猜、不写死在代码里：backend 只会把下面这几项原样拼进请求体。
   #   enabled: false        -> 完全不发送思考相关字段
@@ -40,12 +41,36 @@ model:
   thinking:
     enabled: false
     style: "reasoning_effort"     # reasoning_effort | thinking | both
-    reasoning_effort: "medium"    # minimal | low | medium | high | max
+    reasoning_effort: "low"    # minimal | low | high | max
   # 采样参数。注意：思考模式下部分采样参数可能不被支持，
   # 后端在 thinking.enabled=false 时才会带上 temperature。
   temperature: 0.7
   max_tokens: 8192
   stream: true
+
+# ============================================================================
+# 多模态：把参考图附进请求，让模型真的「看到」画面再改写提示词。
+# deepseek-flash 原生支持（OpenAI 兼容 content 数组：
+#   {"type":"text","text":"..."},
+#   {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,...","detail":"high"}}
+# ）。约束全部来自官方「图像理解」文档：
+#   * 支持 JPEG/PNG/GIF/WebP，格式按**文件内容**判定，不看扩展名；
+#   * 单图 base64 上限 32 MiB，单请求请求体上限 48 MiB，最多 600 张；
+#   * 单边超过约 1300 px 后服务端会等比缩到约 1300x1300 的总像素，
+#     所以 max_edge 默认 1280 —— 再大不会更清楚，只会把请求体撑大。
+# 换成不支持图片的模型 / 中转网关时，设 enabled: false 即可退回纯文本请求
+# （此时请求体与以前逐字节一致）。运行环境需要系统 ffmpeg 做缩放/视频抽帧，
+# 缺失时会退化成「原图直传」并在「环境自检」里提示。
+# ============================================================================
+multimodal:
+  enabled: true          # 总开关；false = 完全不附图片
+  images: true           # 附参考图（页面上「+ 参考图」加进来的）
+  video_frames: 0        # 每个参考视频抽几帧当图片附件（0=不抽；1~4 对运镜/动作有帮助）
+  max_images: 8          # 一次最多附几张；超出部分跳过并在日志里说明
+  detail: "high"         # low(服务端按 512x512 处理) | high | original | auto
+  max_edge: 1280         # 附件长边上限（px）；0=不缩放
+  max_mb_per_image: 20   # 单图预算（base64 前）；服务端硬上限 32
+  max_mb_total: 40       # 附件合计预算；服务端请求体硬上限 48
 
 prompt:
   # system_prompt：文件路径优先；为空则使用下面的 system_prompt_inline。

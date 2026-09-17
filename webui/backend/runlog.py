@@ -10,6 +10,7 @@
      前端可以只看 llm，或只看 error。
   3. **要能调试 LLM 与产物**。LLM 每次调用（system、user、流式输出、tokens、耗时、
      报错）单独落一份完整记录，见 LLMRunStore；作业产物也带路径/大小/帧数落到运行日志。
+     其中 response.raw 是**解析前**的模型原文 —— 模型没按格式输出时，这是唯一的现场。
 
 设计约束与工程其它部分一致：只用标准库；日志模块本身**永远不能把服务弄挂**，
 所以任何写盘/序列化失败都吞掉并记在内部状态里（stats() 里能看到 file_error）。
@@ -454,10 +455,17 @@ class LLMRun:
         self.url = meta.get("url")
         self.mode = meta.get("mode")
         self.request: dict = {}
+        # raw/stray/markers 是「模型没按格式输出」时的唯一证据：
+        #   raw      = 模型吐出的原文（含标记），解析失败时也能看到它到底说了什么
+        #   stray    = 落在标记之外、被解析器丢掉的部分（废话/前言/尾注）
+        #   markers  = 实际见到过哪些开始标记（一个都没有 = 完全没按格式走）
         self.response: dict = {"sections": {"prompt": "", "translation": "", "notes": ""},
                                "section_chars": {"prompt": 0, "translation": 0, "notes": 0},
                                "thinking": "", "chunks": 0, "content_chars": 0,
-                               "reasoning_chars": 0, "missing": []}
+                               "reasoning_chars": 0, "missing": [],
+                               "raw": "", "raw_chars": 0,
+                               "stray": "", "stray_chars": 0,
+                               "markers": [], "bad_chunks": 0, "format_ok": None}
         self.usage: dict | None = None
         self.error: dict | None = None
         self.events: list[dict] = []
@@ -481,6 +489,9 @@ class LLMRun:
                 "system_chars": len(system or ""), "user_chars": len(user or ""),
                 "system_sources": list(system_sources or []),
                 "image_count": len(atts), "attachments": atts,
+                # 图片本体（base64）不落盘，但要留下「这次实际发了多少字节图片」
+                "image_bytes": sum(len((a or {}).get("data_uri") or "")
+                                   for a in (attachments or [])),
             }
             if self.full:
                 self.request["system"] = self.store._clip(system or "")
@@ -493,6 +504,38 @@ class LLMRun:
             self.response["reasoning_chars"] += len(text)
             if self.full:
                 self.response["thinking"] = self.store._clip(self.response["thinking"] + text)
+
+    def note_raw(self, text: str) -> None:
+        """原样记下模型输出（解析前）。格式不符时靠它还原模型到底说了什么。"""
+        if not text:
+            return
+        with self._lock:
+            self.response["raw_chars"] += len(text)
+            if self.full:
+                self.response["raw"] = self.store._clip(self.response["raw"] + text)
+
+    def note_stray(self, text: str) -> None:
+        """记下落在标记之外、被解析器丢掉的内容（前言/尾注/格式错乱的正文）。"""
+        if not text:
+            return
+        with self._lock:
+            self.response["stray_chars"] += len(text)
+            if self.full:
+                self.response["stray"] = self.store._clip(self.response["stray"] + text)
+
+    def note_marker(self, name: str) -> None:
+        """记下实际见到的开始标记；一个都没有 = 模型完全没按协议输出。"""
+        if not name:
+            return
+        with self._lock:
+            if name not in self.response["markers"]:
+                self.response["markers"].append(name)
+
+    def note_bad_chunk(self, line: str, error: str = "") -> None:
+        """流里解析不出来的行（服务端被代理改写、非 SSE 格式等）也要留证。"""
+        with self._lock:
+            self.response["bad_chunks"] += 1
+            self.note_event("bad_chunk", (line or "")[:200], error=error[:200])
 
     def note_delta(self, section: str, text: str) -> None:
         if not text:
@@ -533,6 +576,8 @@ class LLMRun:
                     k: v for k, v in error.items() if k != "message"})
             if missing is not None:
                 self.response["missing"] = list(missing)
+                # 三段标记是否都拿到了：false 时页面/排障脚本第一眼就能看出来
+                self.response["format_ok"] = not missing
         return self.save()
 
     def abort(self, reason: str) -> dict:
@@ -561,6 +606,12 @@ class LLMRun:
             "output_chars": dict(self.response.get("section_chars")
                                  or {k: len(v or "") for k, v in sec.items()}),
             "missing": self.response.get("missing") or [],
+            # 格式诊断：raw_chars 是模型输出总长，missing 为空才代表协议走通
+            "raw_chars": self.response.get("raw_chars"),
+            "stray_chars": self.response.get("stray_chars"),
+            "markers": list(self.response.get("markers") or []),
+            "bad_chunks": self.response.get("bad_chunks"),
+            "format_ok": self.response.get("format_ok"),
             "usage": self.usage,
             "error": (self.error or {}).get("message") if self.error else None,
             "events": len(self.events),
@@ -642,9 +693,21 @@ class LLMRunStore:
             log("LLM 调用结束", source="llm", event="llm.finish", run=run.id,
                 status=run.status, duration_s=summary["duration_s"],
                 tokens=(run.usage or {}).get("total_tokens"),
-                content_chars=summary["content_chars"],
+                content_chars=summary["content_chars"], raw_chars=summary["raw_chars"],
+                markers=",".join(summary["markers"] or []) or "-",
                 images=summary.get("images"),
                 error=summary["error"])
+            # 调用本身成功、但模型没按标记协议输出：这不算 error，却是最需要看见的一类失败，
+            # 单独记一条 warn，页面按 event=llm.format 就能筛出来。
+            missing = summary.get("missing") or []
+            if run.status == "ok" and missing:
+                self.log.warn("LLM 输出缺少标记段", source="llm", event="llm.format",
+                              run=run.id, missing=",".join(missing),
+                              markers=",".join(summary["markers"] or []) or "-",
+                              raw_chars=summary["raw_chars"],
+                              stray_chars=summary["stray_chars"],
+                              hint="模型没按 <<<H3_*>>> 协议输出；"
+                                   "完整原文见本 run 的 response.raw")
         return summary
 
     # -- 查询

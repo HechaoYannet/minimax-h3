@@ -207,7 +207,8 @@ def _post_stream(url: str, headers: dict, payload: dict, timeout: float):
     return resp
 
 
-def _iter_stream(resp):
+def _iter_stream(resp, on_bad=None):
+    """逐行解析 SSE。解析不了的行不再静默丢弃：交给 on_bad 记账（代理改写/HTML 报错页）。"""
     for raw in resp:
         line = raw.decode("utf-8", "replace").strip()
         if not line:
@@ -218,7 +219,9 @@ def _iter_stream(resp):
             break
         try:
             yield json.loads(line)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            if on_bad is not None:
+                on_bad(line, str(e))
             continue
 
 
@@ -374,7 +377,7 @@ class Optimizer:
             except urllib.error.HTTPError as e:
                 body = ""
                 try:
-                    body = e.read().decode("utf-8", "replace")[:600]
+                    body = e.read().decode("utf-8", "replace")[:2000]
                 except Exception:
                     pass
                 msg = f"DeepSeek 返回 HTTP {e.code}"
@@ -432,12 +435,19 @@ class Optimizer:
                         if i >= 0 and (at < 0 or i < at):
                             best, at = name, i
                     if best is None:
-                        # 丢掉标记之前的噪声（模型偶尔会先说一句废话）
+                        # 标记之前的噪声（模型偶尔会先说一句废话）：解析时丢掉，但原样留证，
+                        # 因为「模型根本没输出标记」正是要靠这段文字才能看出来。
                         if len(state["buf"]) > 64:
+                            if run is not None:
+                                run.note_stray(state["buf"][:-32])
                             state["buf"] = state["buf"][-32:]
                         return out
+                    if at > 0 and run is not None:
+                        run.note_stray(state["buf"][:at])
                     state["buf"] = state["buf"][at + len(MARKERS[best][0]):]
                     state["section"] = best
+                    if run is not None:
+                        run.note_marker(best)
                     out.append(("section", best))
                 else:
                     end = MARKERS[cur][1]
@@ -460,7 +470,8 @@ class Optimizer:
 
         try:
             if payload.get("stream"):
-                for obj in _iter_stream(resp):
+                on_bad = run.note_bad_chunk if run is not None else None
+                for obj in _iter_stream(resp, on_bad=on_bad):
                     if obj.get("usage"):
                         state["usage"] = obj["usage"]
                     content, reasoning = _extract_delta(obj)
@@ -469,6 +480,9 @@ class Optimizer:
                             run.note_thinking(reasoning)
                         yield {"type": "thinking", "text": reasoning}
                     if content:
+                        # 先原样记账再解析：格式不符时，response.raw 是唯一的现场
+                        if run is not None:
+                            run.note_raw(content)
                         for section, chunk in feed(content):
                             if section == "section":
                                 yield {"type": "section", "section": chunk}
@@ -483,12 +497,16 @@ class Optimizer:
                     content, reasoning = _extract_delta(obj)
                     state["usage"] = obj.get("usage") or state["usage"]
                 except json.JSONDecodeError:
-                    yield fail("服务端返回的不是合法 JSON", detail=raw[:600])
+                    if run is not None:
+                        run.note_raw(raw)      # 连 JSON 都不是：原文必须留证
+                    yield fail("服务端返回的不是合法 JSON", detail=raw[:2000])
                     return
                 if reasoning:
                     if run is not None:
                         run.note_thinking(reasoning)
                     yield {"type": "thinking", "text": reasoning}
+                if content and run is not None:
+                    run.note_raw(content)
                 for section, chunk in feed(content):
                     if section != "section":
                         if run is not None:
@@ -498,13 +516,39 @@ class Optimizer:
             yield fail(f"读取响应流失败：{e}")
             return
 
+        # ---- 收尾：把「格式不完整」也变成看得见的证据 ----------------------
+        # 模型漏写结束标记时，残余的正文原本会被整个丢掉（于是 notes 段凭空消失，
+        # 只剩一句 missing）。这里按当前段收下，并记一条 unterminated 事件说明原因。
+        if state["section"] and state["buf"]:
+            sec = state["section"]
+            chunk, state["buf"] = state["buf"], ""
+            state["text"][sec] += chunk
+            if run is not None:
+                run.note_event("unterminated", f"{sec} 段没有结束标记，已按原文收下",
+                               marker=MARKERS[sec][1], chars=len(chunk))
+        elif state["buf"]:
+            if run is not None:
+                run.note_stray(state["buf"])
+            state["buf"] = ""
+
+        # 一行 SSE 都没解析出来：多半是被代理/网关改写成了 HTML 或纯 JSON 报错页
+        if run is not None and run.response.get("bad_chunks") and not run.response.get("chunks"):
+            self.log.warn("promptopt: 响应流里没有可解析的 SSE 数据块", source="llm",
+                          event="llm.bad_stream", run=run.id,
+                          bad_chunks=run.response["bad_chunks"],
+                          hint="对照 response.raw / events 里的 bad_chunk：端点可能没返回 SSE")
+
         text = {k: v.strip() for k, v in state["text"].items()}
         missing = [k for k in order if not text.get(k)]
         if run is not None:
             run.set_usage(state["usage"])
             run.finish("ok", missing=missing)
+        stats = run.summary() if run is not None else {}
         yield {"type": "done", "result": text.get("prompt", ""),
                "translation": text.get("translation", ""), "notes": text.get("notes", ""),
                "missing": missing, "usage": state["usage"],
+               # 格式诊断：missing 非空时，页面提示「看调用记录的 response.raw」
+               "format_ok": not missing, "raw_chars": stats.get("raw_chars"),
+               "markers": stats.get("markers") or [],
                "refs": refs, "mode": mode_key, "run_id": (run.id if run else None),
                "duration_s": round(int(req.get("num_frames") or 0) / 24.0, 2)}

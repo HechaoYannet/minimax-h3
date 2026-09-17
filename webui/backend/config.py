@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover
 ROOT = repo_root()
 SERVER_YAML = os.path.join(ROOT, "config", "server.yaml")
 DEEPSEEK_YAML = os.path.join(ROOT, "config", "deepseek.yaml")
+QUARK_YAML = os.path.join(ROOT, "config", "quark.yaml")
 PARAMS_SPEC = os.path.join(ROOT, "config", "params.spec.json")
 
 # deepseek.yaml 的 multimodal 段缺失时的默认值。deepseek-flash 本身是多模态模型，
@@ -68,6 +69,33 @@ SERVER_FALLBACK = {
         "llm_enabled": True, "llm_capture": "full",
         "llm_max_runs": 100, "llm_max_chars": 200000,
     },
+}
+
+
+# quark.yaml 缺失/缺段时的兜底。默认值刻意与页面上的说明一致：
+# **不重新编码**（保画质）、打成加密 zip（密码 123456，只打包不 deflate）、
+# 公开分享链接、永久有效。
+QUARK_FALLBACK = {
+    "enabled": True,
+    "runner": "auto",              # auto | windows | linux
+    "cli": "web_disk/quarkclouddrive-1.0.20/scripts/quark-drive.cjs",
+    "node": "",
+    "agent": {
+        "id": "deepseek",
+        "dsh_home": "",
+        "session_input": "MiniMax-H3 创作台",
+    },
+    "compress": {
+        "enabled": False, "crf": 26, "preset": "veryfast",
+        "max_edge": 1280, "audio_bitrate": "96k", "pix_fmt": "yuv420p",
+    },
+    "archive": {"enabled": True, "password": "123456", "level": 0,
+                "tool": "auto", "tar_bin": ""},
+    "share": {"enabled": True, "url_type": 1, "expired_type": 1,
+              "title": "MiniMax-H3 生成视频"},
+    "upload": {"parent_fid": "", "dir_name": "MiniMax-H3"},
+    "download": {"dir": "workspace/netdisk"},
+    "keep_work": True,
 }
 
 
@@ -185,6 +213,42 @@ def deepseek_config() -> dict:
     mm = cfg.get("multimodal")
     cfg["multimodal"] = _deep_merge(MULTIMODAL_FALLBACK,
                                     mm if isinstance(mm, dict) else {})
+    return cfg
+
+
+def quark_config() -> dict:
+    """夸克网盘接入配置（config/quark.yaml，热读取）。
+
+    这里只做「补默认值 + 把相对路径拼成绝对路径」，不做任何环境探测 ——
+    node / CLI 到底能不能用，由 backend/quark.py 在请求时现探。
+    """
+    try:
+        raw = _read_yaml(QUARK_YAML)
+    except ValueError:
+        raw = {}
+    cfg = _deep_merge(QUARK_FALLBACK, raw if isinstance(raw, dict) else {})
+
+    cli = (cfg.get("cli") or "").strip()
+    cfg["cli"] = cli if (not cli or os.path.isabs(cli)) else os.path.abspath(os.path.join(ROOT, cli))
+    node = (cfg.get("node") or "").strip()
+    if node and not os.path.isabs(node):
+        cfg["node"] = os.path.abspath(os.path.join(ROOT, node))
+    else:
+        cfg["node"] = node
+
+    dl = ((cfg.get("download") or {}).get("dir") or QUARK_FALLBACK["download"]["dir"])
+    cfg["download"] = dict(cfg.get("download") or {})
+    cfg["download"]["dir"] = dl if os.path.isabs(dl) else os.path.abspath(os.path.join(ROOT, dl))
+
+    arc = dict(cfg.get("archive") or {})
+    try:
+        arc["level"] = max(0, min(9, int(arc.get("level", 0))))
+    except (TypeError, ValueError):
+        arc["level"] = 0
+    cfg["archive"] = arc
+
+    cfg["root"] = ROOT
+    cfg["source"] = QUARK_YAML
     return cfg
 
 
