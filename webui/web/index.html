@@ -14,23 +14,23 @@
   <aside class="rail" id="rail">
     <div class="rail-brand">
       <span class="logo"></span>
-      <span class="brand-text">即梦 · H3 创作台</span>
-      <button class="icon-btn" id="rail-toggle" title="收起/展开侧栏">☰</button>
+      <span class="brand-text">奶龙 · H3 创作台</span>
+      <button class="icon-btn" id="rail-toggle" title="收起/展开侧栏" aria-label="收起或展开侧栏" aria-expanded="true">☰</button>
     </div>
 
     <nav class="rail-nav">
-      <button class="nav-item active" data-view="create"><i>✦</i>创作</button>
-      <button class="nav-item" data-view="library"><i>▦</i>作品库</button>
-      <button class="nav-item" data-view="disk"><i>☁</i>网盘</button>
-      <button class="nav-item" data-view="guide"><i>?</i>使用说明</button>
-      <button class="nav-item" data-view="logs"><i>▤</i>运行日志</button>
-      <button class="nav-item" data-view="about"><i>⚙</i>环境自检</button>
+      <button class="nav-item active" data-view="create" title="创作"><i>✦</i><span class="nav-text">创作</span></button>
+      <button class="nav-item" data-view="library" title="作品库"><i>▦</i><span class="nav-text">作品库</span></button>
+      <button class="nav-item" data-view="disk" title="网盘"><i>☁</i><span class="nav-text">网盘</span></button>
+      <button class="nav-item" data-view="guide" title="使用说明"><i>?</i><span class="nav-text">使用说明</span></button>
+      <button class="nav-item" data-view="logs" title="运行日志"><i>▤</i><span class="nav-text">运行日志</span></button>
+      <button class="nav-item" data-view="about" title="环境自检"><i>⚙</i><span class="nav-text">环境自检</span></button>
     </nav>
 
     <div class="rail-section">
       <div class="rail-section-title">对话</div>
       <div id="session-list" class="session-list"></div>
-      <button class="ghost-btn wide" id="new-session">+ 新建对话</button>
+      <button class="ghost-btn wide" id="new-session" title="新建对话"><i class="nav-icon">+</i><span class="nav-text">新建对话</span></button>
     </div>
 
     <div class="rail-foot">
@@ -118,16 +118,19 @@
           </div>
         </div>
 
+        <!-- 从作品库恢复会话时的提示条：原作业的失败原因就摆在参数旁边 -->
+        <div class="restore-banner" id="restore-banner" hidden></div>
+
         <div class="chips" id="preset-chips"></div>
 
         <!-- 提示词结果 -->
         <div class="card" id="prompt-card" hidden>
           <div class="card-head">
-            <div class="tabs" id="prompt-tabs">
-              <button class="tab active" data-pane="en">英文提示词（送进流水线）</button>
-              <button class="tab" data-pane="zh">中文回译（给人看）</button>
-              <button class="tab" data-pane="notes">结构说明</button>
-              <button class="tab" data-pane="raw">调试（system / user / 附图）</button>
+            <div class="tabs" id="prompt-tabs" role="tablist">
+              <button type="button" role="tab" class="tab active" data-pane="en" aria-selected="true">英文提示词（送进流水线）</button>
+              <button type="button" role="tab" class="tab" data-pane="zh" aria-selected="false">中文回译（给人看）</button>
+              <button type="button" role="tab" class="tab" data-pane="notes" aria-selected="false">结构说明</button>
+              <button type="button" role="tab" class="tab" data-pane="raw" aria-selected="false">调试（system / user / 附图）</button>
             </div>
             <div class="card-actions">
               <button class="ghost-btn sm" id="btn-copy-prompt">复制英文</button>
@@ -222,8 +225,16 @@
       <section class="view" id="view-library" hidden>
         <h1>作品库</h1>
         <div class="muted" id="library-root"></div>
+        <div class="lib-toolbar">
+          <label class="mini tiny"><input type="checkbox" id="lib-only-failed"> 只看未完成 / 失败</label>
+          <span class="muted tiny">
+            失败（例如爆显存）也会留在这里。点<b>「恢复参数」</b>把这条作业的提示词、参考素材与全部生成参数
+            还原成一个新对话，改完参数直接重新生成 —— 不用重新抄一遍。
+          </span>
+          <button class="ghost-btn sm" id="btn-library-refresh">刷新</button>
+        </div>
         <div class="table-wrap"><table class="tbl" id="library-table">
-          <thead><tr><th>时间</th><th>文件</th><th>形状</th><th>步数</th><th>种子</th>
+          <thead><tr><th>时间</th><th>状态</th><th>文件</th><th>形状</th><th>步数</th><th>种子</th>
           <th>用时</th><th>峰值显存</th><th>操作</th></tr></thead>
           <tbody></tbody>
         </table></div>

@@ -20,6 +20,7 @@ const S = {
   estimate: null, risks: [], jobs: [], activeJob: null, telemetry: null,
   llm: { runs: [], stats: null },
   disk: null,                 // 网盘页签的状态（见文件末尾的「夸克网盘」一节）
+  sessions: [], activeSession: null,  // 对话（会话）列表与当前对话，见文件末尾的「对话」一节
   ui: { monitor: true, railCollapsed: false, view: 'create', promptPane: 'en',
         logLevel: 'info', logSource: 'all', logQ: '', logFollow: true },
 };
@@ -96,6 +97,11 @@ async function boot() {
     bindEvents();
     applyLoggingConfig(cfg);
     applyDiskConfig(cfg.disk);
+    // 界面偏好与对话都在浏览器里：先把折叠态和上次的对话铺回去，再显示主界面（避免闪一下默认态）
+    loadUiPrefs();
+    applyRailState();
+    toggleMonitor(S.ui.monitor);
+    initSessions();
     startTelemetry();
     startLogStream();
     await refreshJobs();
@@ -179,6 +185,7 @@ function applyPreset(name, silent) {
   updateSummaries();
   if (!silent) toast('已切到预设 ' + name + '：' + p.width + '×' + p.height + ' · ' +
     p.num_frames + '帧 · ' + p.steps + '步', 'ok', 3200);
+  scheduleSessionSave();
 }
 
 function buildShapeSelectors() {
@@ -388,7 +395,7 @@ function fieldFor(p) {
   input.addEventListener('change', () => {
     S.values[p.id] = readCtl(p.id);
     if (p.id === 'width' || p.id === 'height' || p.id === 'num_frames') refreshShapeControls();
-    scheduleEstimate(); updateSummaries();
+    scheduleEstimate(); updateSummaries(); scheduleSessionSave();
   });
   ctl.appendChild(input);
   f.appendChild(ctl);
@@ -438,10 +445,13 @@ function writeCtl(id, v) {
   n.value = (v === null || v === undefined) ? '' : v;
 }
 
-function initValues() {
+/* 一份全新的参数默认值（不碰界面）。
+   用途有两个：首次进入时铺默认值；从作品库恢复作业时先铺默认值、再覆盖该作业记下来的项 ——
+   没被作业记录过的参数回到默认，而不是粘上当前界面上碰巧留下的值。 */
+function specDefaults() {
   const d = (S.cfg.server || {}).defaults || {};
   const defPreset = d.preset || S.spec.default_preset || Object.keys(S.presets)[0];
-  S.values.preset = defPreset;
+  const values = { preset: defPreset };
   (S.spec.params || []).forEach((p) => {
     let v = p.default;
     if (v && typeof v === 'object' && v.__preset__) {
@@ -449,18 +459,23 @@ function initValues() {
       v = (pv[v.__preset__] !== undefined && pv[v.__preset__] !== null) ? pv[v.__preset__]
         : (v.fallback !== undefined ? v.fallback : null);
     }
-    S.values[p.id] = v;
+    values[p.id] = v;
   });
   const pv = S.presets[defPreset] || {};
-  S.values.width = pv.width || 640;
-  S.values.height = pv.height || 384;
-  S.values.num_frames = pv.num_frames || 73;
-  S.values.steps = pv.steps || 20;
-  S.values.seed = d.seed === undefined ? 42 : d.seed;
-  S.values.scheduler = d.scheduler || 'auto';
-  S.values.dit_onload = d.dit_onload || 'cpu';
-  S.values.sdpa_backend = d.sdpa_backend || 'cudnn';
-  S.values.lora_alpha = 1.0;
+  values.width = pv.width || 640;
+  values.height = pv.height || 384;
+  values.num_frames = pv.num_frames || 73;
+  values.steps = pv.steps || 20;
+  values.seed = d.seed === undefined ? 42 : d.seed;
+  values.scheduler = d.scheduler || 'auto';
+  values.dit_onload = d.dit_onload || 'cpu';
+  values.sdpa_backend = d.sdpa_backend || 'cudnn';
+  values.lora_alpha = 1.0;
+  return values;
+}
+
+function initValues() {
+  S.values = specDefaults();
   buildShapeSelectors();
   syncInputsFromValues();
   refreshShapeControls();
@@ -661,6 +676,7 @@ function renderRefs() {
     row.appendChild(ops);
     host.appendChild(row);
   });
+  scheduleSessionSave();
 }
 
 /* ------------------------------------------------------------------ 预估 */
@@ -729,10 +745,7 @@ function renderRiskBox(risks, notes) {
 
 /* ------------------------------------------------------------------ 事件绑定 */
 function bindEvents() {
-  $('rail-toggle').onclick = () => {
-    S.ui.railCollapsed = !S.ui.railCollapsed;
-    $('rail').classList.toggle('collapsed', S.ui.railCollapsed);
-  };
+  $('rail-toggle').onclick = () => toggleRail();
   $('btn-monitor').onclick = () => toggleMonitor();
   $('btn-monitor-close').onclick = () => toggleMonitor(false);
   $('btn-refresh').onclick = refreshAll;
@@ -744,6 +757,7 @@ function bindEvents() {
       toast('编辑模式对应官方 tav2va：请添加「视频+音轨」参考。', 'info', 6000);
     }
     if (edit && S.presets['video-edit']) applyPreset('video-edit', true);
+    scheduleSessionSave();
   });
   $('sel-preset').onchange = () => applyPreset($('sel-preset').value);
   $('sel-res').onchange = () => {
@@ -752,19 +766,25 @@ function bindEvents() {
     const wh = v.split('x');
     S.values.width = Number(wh[0]); S.values.height = Number(wh[1]);
     writeCtl('width', S.values.width); writeCtl('height', S.values.height);
-    scheduleEstimate(); updateSummaries();
+    scheduleEstimate(); updateSummaries(); scheduleSessionSave();
   };
   $('sel-dur').onchange = () => {
     S.values.num_frames = Number($('sel-dur').value);
     writeCtl('num_frames', S.values.num_frames);
-    scheduleEstimate(); updateSummaries();
+    scheduleEstimate(); updateSummaries(); scheduleSessionSave();
   };
-  $('inp-seed').onchange = () => { S.values.seed = Number($('inp-seed').value) || 0; updateSummaries(); };
-  $('sel-mode').onchange = () => { S.mode = $('sel-mode').value; };
+  $('inp-seed').onchange = () => { S.values.seed = Number($('inp-seed').value) || 0; updateSummaries(); scheduleSessionSave(); };
+  $('sel-mode').onchange = () => { S.mode = $('sel-mode').value; scheduleSessionSave(); };
   $('btn-optimize').onclick = optimize;
   $('btn-generate').onclick = () => submitJob(false);
   $('btn-preview').onclick = previewCmd;
   $('btn-refresh-jobs').onclick = refreshJobs;
+  // 作品库：刷新 + 只看未完成（失败排查用）
+  $('btn-library-refresh').onclick = refreshJobs;
+  $('lib-only-failed').onchange = () => {
+    libOnlyUnfinished = !!$('lib-only-failed').checked;
+    renderLibrary();
+  };
   // 网盘页签
   $('btn-disk-refresh').onclick = () => loadDiskStatus(true);
   $('btn-disk-login').onclick = () => diskLogin('');
@@ -803,6 +823,7 @@ function bindEvents() {
   };
   // 优化之后再动输入框 = 英文结果已失效，必须马上把这件事显出来
   $('prompt-input').addEventListener('input', updatePromptUse);
+  $('prompt-input').addEventListener('input', scheduleSessionSave);
   $('btn-close-prompt').onclick = () => { $('prompt-card').hidden = true; };
   $('btn-advanced').onclick = () => {
     ['card-params', 'card-perf', 'card-lora', 'card-cmd'].forEach(id => $(id).classList.remove('collapsed'));
@@ -819,10 +840,10 @@ function bindEvents() {
     toast(anyClosed ? '已展开全部参数说明' : '已收起全部参数说明', 'info', 2400);
   };
   document.querySelectorAll('[data-collapse]').forEach(h => h.onclick = () => h.parentElement.classList.toggle('collapsed'));
-  document.querySelectorAll('#prompt-tabs .tab').forEach(t => t.onclick = () => {
-    S.ui.promptPane = t.dataset.pane;
-    ['en', 'zh', 'notes', 'raw'].forEach(p => { $('pane-' + p).hidden = (p !== S.ui.promptPane); });
-  });
+  // 页签点击统一走 switchPane：它是「哪个高亮 / 显示哪个」的唯一口径。
+  // 以前这里只切 hidden 不改 active，于是优化流自动切到「中文回译」之后，
+  // 再点「英文提示词」会出现高亮还在中文、下面已是英文的错位。
+  document.querySelectorAll('#prompt-tabs .tab').forEach(t => t.onclick = () => switchPane(t.dataset.pane));
   // 运行日志页签
   $('btn-open-logs').onclick = () => selectView('logs');
   $('log-level').onchange = () => { S.ui.logLevel = $('log-level').value; startFullLogStream(true); };
@@ -835,15 +856,8 @@ function bindEvents() {
   $('btn-llm-refresh').onclick = loadLlmRuns;
   $('log-follow').onchange = () => { S.ui.logFollow = $('log-follow').checked; };
   $('log-wrap').onchange = () => $('log-full').classList.toggle('nowrap', !$('log-wrap').checked);
-  $('new-session').onclick = () => {
-    S.refs = []; renderRefs();
-    $('prompt-input').value = '';
-    S.optimize = { en: '', zh: '', notes: '', thinking: '', mode: null, running: false, system: '', user: '', runId: '', attachments: [], source: '', useZh: false };
-    $('prompt-card').hidden = true;
-    scheduleEstimate();
-    updatePromptUse();
-    toast('已清空当前创作（生成参数保持不变）', 'ok', 2600);
-  };
+  // 新建对话：把当前对话存好后开一个干净的（生成参数沿用当前值，便于连续微调）
+  $('new-session').onclick = () => newSession();
   $('modal-close').onclick = () => { $('modal').hidden = true; };
   $('modal').onclick = (e) => { if (e.target === $('modal')) $('modal').hidden = true; };
 
@@ -869,7 +883,9 @@ function bindEvents() {
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); submitJob(false); }
   });
-  window.addEventListener('beforeunload', saveSession);
+  // 关页面前把当前对话落盘（beforeunload 在部分浏览器不可靠，再加一个 pagehide）
+  window.addEventListener('beforeunload', () => captureSession());
+  window.addEventListener('pagehide', () => captureSession());
 }
 
 function showDropzone(on) {
@@ -884,6 +900,7 @@ function showDropzone(on) {
 function toggleMonitor(force) {
   S.ui.monitor = (force === undefined) ? !S.ui.monitor : force;
   $('monitor').classList.toggle('hidden', !S.ui.monitor);
+  saveUiPrefs();
 }
 
 async function refreshAll() {
@@ -902,7 +919,12 @@ function selectView(v) {
   ['create', 'library', 'disk', 'guide', 'logs', 'about'].forEach(x => { $('view-' + x).hidden = (x !== v); });
   document.querySelectorAll('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === v));
   S.ui.view = v;
-  if (v === 'library') renderLibrary();
+  if (v === 'library') {
+    // 进页签就拉一次最新作业：失败记录是这里的主角，不该等手动刷新
+    if ($('lib-only-failed')) $('lib-only-failed').checked = libOnlyUnfinished;
+    renderLibrary();
+    refreshJobs();
+  }
   if (v === 'logs') { startFullLogStream(false); loadLlmRuns(); }
   if (v === 'disk') {
     fillDiskSources();
@@ -1033,10 +1055,18 @@ function handleOptimizeEvent(ev, obj) {
   }
 }
 
+/* 提示词卡片的页签：高亮、内容、无障碍属性必须同时跟着走 ——
+   只切 hidden 不改 active 会留下「中文回译高亮着、下面却是英文」的错位。 */
+const PROMPT_PANES = ['en', 'zh', 'notes', 'raw'];
 function switchPane(pane) {
+  if (PROMPT_PANES.indexOf(pane) < 0) pane = 'en';
   S.ui.promptPane = pane;
-  document.querySelectorAll('#prompt-tabs .tab').forEach(x => x.classList.toggle('active', x.dataset.pane === pane));
-  ['en', 'zh', 'notes', 'raw'].forEach(p => { $('pane-' + p).hidden = (p !== pane); });
+  document.querySelectorAll('#prompt-tabs .tab').forEach((x) => {
+    const on = x.dataset.pane === pane;
+    x.classList.toggle('active', on);
+    x.setAttribute('aria-selected', String(on));
+  });
+  PROMPT_PANES.forEach(p => { $('pane-' + p).hidden = (p !== pane); });
 }
 
 function setPromptPanes() {
@@ -1073,6 +1103,7 @@ function finishOptimize(msg, isErr) {
     st.appendChild(link);
   }
   updatePromptUse();
+  scheduleSessionSave();
   if (!isErr) {
     toast('提示词已生成（' + (S.optimize.mode || '') + '），可直接开始生成', 'ok', 4200);
     if (S.ui.view === 'logs') loadLlmRuns();
@@ -1116,10 +1147,27 @@ function updatePromptUse() {
   node.textContent = txt;
 }
 
+/* 当前选中的是「生成」还是「编辑」页签（恢复会话时要把它一起铺回去）。 */
+function currentModeTab() {
+  const t = document.querySelector('.mode-tab.active');
+  return (t && t.dataset.mode === 'edit') ? 'edit' : 'generate';
+}
+
 function buildSubmitBody(force) {
   const v = S.values;
+  const eff = effectivePrompt();
   return Object.assign(estimatePayload(), {
-    prompt: effectivePrompt().text,
+    prompt: eff.text,
+    // 作品库事后要能「恢复完整会话」：中文原文 / 优化结果 / 编辑模式一并落进作业记录。
+    // 只传 en/zh/notes/mode/source/runId/useZh —— system / user / 思考全文走 LLM 调用记录，
+    // 由 runId 回看，避免每条作业都背着几万字（见 backend/jobs.py 的 clean_optimize）。
+    prompt_zh: eff.zh,
+    prompt_source: eff.source,
+    mode: S.mode,
+    mode_tab: currentModeTab(),
+    optimize: { en: S.optimize.en, zh: S.optimize.zh, notes: S.optimize.notes,
+                mode: S.optimize.mode, source: S.optimize.source, runId: S.optimize.runId,
+                useZh: S.optimize.useZh },
     steps: v.steps, seed: v.seed, preset: v.preset,
     lora: v.lora || null, lora_alpha: v.lora_alpha,
     vram_limit: v.vram_limit, activation_reserve: v.activation_reserve,
@@ -1269,6 +1317,12 @@ function jobCard(j) {
     const open = el('button', null, '播放 / 路径');
     open.onclick = () => openResult(j.id);
     ops.appendChild(open);
+  }
+  if (['running', 'queued', 'cancelling'].indexOf(j.status) < 0) {
+    const rs = el('button', null, '恢复参数');
+    rs.title = '把这条作业的提示词、参考素材与全部参数还原成新对话';
+    rs.onclick = () => restoreJob(j.id);
+    ops.appendChild(rs);
   }
   box.appendChild(ops);
   return box;
@@ -1744,6 +1798,11 @@ function renderGallery() {
       a.onclick = () => openResult(j.id);
       ops.appendChild(a);
     }
+    // 失败的作品也在「最近生成」里：恢复参数比重新抄一遍提示词和几十个参数快得多
+    const rs = el('button', null, '恢复参数');
+    rs.title = '把这条作业的提示词、参考素材与全部参数还原成新对话';
+    rs.onclick = () => restoreJob(j.id);
+    ops.appendChild(rs);
     const cp = el('button', null, '复制路径');
     cp.onclick = () => api('/api/jobs/' + j.id + '/result').then((res) => {
       if (res.output) { navigator.clipboard.writeText(res.output.windows); toast('已复制', 'ok', 3000); }
@@ -1755,29 +1814,167 @@ function renderGallery() {
   });
 }
 
+/* 作品库「只看未完成 / 失败」开关：失败排查时的默认视角。 */
+let libOnlyUnfinished = false;
+
+const JOB_STATUS_ZH = {
+  done: ['ok', '完成'], failed: ['err', '失败'], cancelled: ['warn', '已取消'],
+  interrupted: ['warn', '已中断'], running: ['', '运行中'], queued: ['', '排队中'],
+  cancelling: ['warn', '取消中'],
+};
+
+function jobStatusBadge(j) {
+  const active = j.status === 'running' || j.status === 'queued' || j.status === 'cancelling';
+  const hit = JOB_STATUS_ZH[j.status] || ['', j.status || '?'];
+  const label = (active && j.stage_zh) ? j.stage_zh : hit[1];
+  const b = el('span', 'badge ' + hit[0], label);
+  if (j.error) b.title = j.error;
+  else if (j.stage_zh && j.stage_zh !== label) b.title = j.stage_zh;
+  return b;
+}
+
+/* ---------------------------------------------------------------- 长文本折叠
+ * 表格里一个超长文件名 / 报错会把整行撑变形，所以默认只显示一行（省略号），
+ * 点「展开」才换行看全文。按钮只在真的被截断时出现；展开状态按 key 记住，
+ * 列表重绘（刷新作业）之后不会被重新折叠。
+ */
+const clampOpen = new Set();
+
+function collapsible(text, cls, key) {
+  const wrap = el('div', 'clamp' + (cls ? ' ' + cls : ''));
+  const body = el('span', 'clamp-text', text);
+  body.title = text;
+  const btn = el('button', 'clamp-toggle', '展开');
+  btn.type = 'button';
+  btn.hidden = true;
+  const sync = () => {
+    if (wrap.classList.contains('open')) { btn.hidden = false; return; }
+    btn.hidden = body.scrollWidth <= body.clientWidth + 1;
+  };
+  if (key && clampOpen.has(key)) { wrap.classList.add('open'); btn.textContent = '收起'; }
+  btn.onclick = (ev) => {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    const open = wrap.classList.toggle('open');
+    btn.textContent = open ? '收起' : '展开';
+    if (key) { if (open) clampOpen.add(key); else clampOpen.delete(key); }
+    if (open) btn.hidden = false;
+  };
+  wrap.appendChild(body);
+  wrap.appendChild(btn);
+  // 页签/面板隐藏着的时候量不出宽度：交给 ResizeObserver 等真正显示出来再判断
+  if (typeof ResizeObserver === 'function') new ResizeObserver(sync).observe(body);
+  else setTimeout(sync, 0);
+  return wrap;
+}
+
 function renderLibrary() {
   const tb = $('library-table').querySelector('tbody');
+  if (!tb) return;
   tb.innerHTML = '';
-  S.jobs.forEach((j) => {
+  const all = S.jobs || [];
+  const list = libOnlyUnfinished ? all.filter(j => j.status !== 'done') : all;
+  if (!list.length) {
+    const tr = document.createElement('tr');
+    const td = el('td', 'muted', all.length
+      ? '没有未完成 / 失败的记录。'
+      : '还没有作业记录。生成一次之后这里会留下完整参数；失败（比如爆显存）也能从这里「恢复参数」。');
+    td.colSpan = 9;
+    tr.appendChild(td);
+    tb.appendChild(tr);
+    return;
+  }
+  list.forEach((j) => {
     const r = j.request || {};
     const tr = document.createElement('tr');
-    [fmtClock(j.created),
-     (j.result && j.result.out) ? j.result.out.split('/').pop() : '(未产出)',
-     (r.width || '?') + '×' + (r.height || '?') + '×' + (r.num_frames || '?') + 'f',
+    tr.appendChild(el('td', null, fmtClock(j.created)));
+
+    const stTd = el('td');
+    stTd.appendChild(jobStatusBadge(j));
+    if (j.error) stTd.appendChild(collapsible(j.error, 'cell-err', j.id + ':err'));
+    tr.appendChild(stTd);
+
+    const fileTd = el('td');
+    if (j.result && j.result.out) {
+      fileTd.appendChild(collapsible(j.result.out.split('/').pop(), 'cell-file', j.id + ':file'));
+    } else {
+      fileTd.appendChild(el('span', 'muted', '(未产出)'));
+    }
+    tr.appendChild(fileTd);
+
+    [(r.width || '?') + '×' + (r.height || '?') + '×' + (r.num_frames || '?') + 'f',
      r.steps || '?', (r.seed === undefined ? '?' : r.seed),
      fmtDur(j.elapsed_s), (j.peak_vram_gib || '--') + ' GiB'
     ].forEach(c => tr.appendChild(el('td', null, c)));
+
     const td = el('td');
-    if (j.status === 'done') {
+    const ops = el('div', 'row-ops');
+    const rs = el('button', 'ghost-btn sm', '恢复参数');
+    rs.title = '把这条作业的提示词、参考素材与全部参数还原成一个新对话；改完参数直接重新生成';
+    rs.onclick = () => restoreJob(j.id);
+    ops.appendChild(rs);
+    if (j.status === 'done' && j.result && j.result.out) {
       const a = el('button', 'ghost-btn sm', '播放');
       a.onclick = () => openResult(j.id);
-      td.appendChild(a);
-    } else {
-      td.appendChild(el('span', 'muted', j.stage_zh || j.status));
+      ops.appendChild(a);
     }
+    const det = el('button', 'ghost-btn sm', '详情');
+    det.onclick = () => openJobDetail(j.id);
+    ops.appendChild(det);
+    td.appendChild(ops);
     tr.appendChild(td);
     tb.appendChild(tr);
   });
+}
+
+/* 作业详情：一次看清「当时到底提交了什么」——提示词来源、形状、参数与命令；
+   恢复按钮就在这个弹窗里，恢复前先核对。 */
+async function openJobDetail(jobId) {
+  let job = null;
+  try {
+    const r = await api('/api/jobs/' + encodeURIComponent(jobId));
+    job = (r && r.job) || null;
+  } catch (e) { toast('读取作业失败：' + e.message, 'err', 8000); return; }
+  if (!job) { toast('作业不存在（服务重启后只保留最近 50 条记录）', 'err', 8000); return; }
+  const req = job.request || {};
+  const wrap = el('div');
+  const kv = el('div', 'kv');
+  const add = (k, v) => { kv.appendChild(el('div', null, k)); kv.appendChild(el('div', null, v)); };
+  add('作业号', job.id);
+  add('状态', (job.stage_zh || job.status) + (job.created ? ' · ' + fmtClock(job.created) : ''));
+  add('形状', (req.width || '?') + '×' + (req.height || '?') + ' × ' + (req.num_frames || '?') + ' 帧');
+  add('步数 / 种子', (req.steps || '?') + ' 步 · seed ' + (req.seed === undefined ? '?' : req.seed));
+  add('用时 / 峰值显存', fmtDur(job.elapsed_s) + ' · ' + (job.peak_vram_gib || '--') + ' GiB');
+  add('提示词来源', req.prompt_source === 'en' ? '英文优化提示词'
+    : (req.prompt_source === 'zh' ? '中文原文' : '（旧记录，未标注来源）'));
+  if ((req.refs || []).length) {
+    add('参考素材', req.refs.map(x => (x.kind || '?') + ' · ' + (x.name || x.path)).join('；'));
+  }
+  wrap.appendChild(kv);
+  if (job.error) {
+    const e = el('div', 'errbox');
+    e.textContent = '失败原因：' + job.error;
+    e.style.marginTop = '10px';
+    wrap.appendChild(e);
+  }
+  const mkPre = (title, text) => {
+    if (!text) return;
+    wrap.appendChild(el('div', 'doc-sub', title));
+    const pre = el('pre', 'prompt-pane mono');
+    pre.style.maxHeight = '200px';
+    pre.textContent = text;
+    wrap.appendChild(pre);
+  };
+  mkPre('中文原文（你当时写的）', req.prompt_zh || '');
+  mkPre('送进流水线的提示词', req.prompt || '');
+  mkPre('中文回译', (req.optimize || {}).zh || '');
+  const actions = el('div', 'card-actions');
+  actions.style.marginTop = '10px';
+  const log = el('button', 'ghost-btn sm', '看原作业日志');
+  log.onclick = () => { $('modal').hidden = true; openJobStream(job.id); toggleMonitor(true); };
+  actions.appendChild(log);
+  wrap.appendChild(actions);
+  confirmModal('作业详情 · ' + job.id, wrap, '恢复成新对话', () => restoreJob(job.id));
 }
 
 /* ------------------------------------------------------------------ 文档 */
@@ -2433,16 +2630,453 @@ function useJobForDisk(jobId) {
   toast('已选好产物，点「开始打包并上传」', 'info', 4000);
 }
 
-/* ------------------------------------------------------------------ 本地草稿 */
-function saveSession() {
+/* ------------------------------------------------------------------ 对话（会话管理）
+ *
+ * 一个「对话」= 一次创作的完整上下文：中文原文 / 参考素材 / 优化结果（含中文回译与调试全文）/
+ * 生成参数 / 编辑模式。全部存在浏览器 localStorage 里，后端不参与 —— 刷新、切对话都不丢，
+ * 也不需要后端加一套账号/存储。左栏「对话」列表是它唯一的入口。
+ *
+ * 为什么不能只是「新建=清空输入框」：那样每换一个想法就把上一份提示词、参考素材和调好的参数
+ * 一起冲掉，用户只能靠一次性复制粘贴自救。这里把「当前上下文」变成可命名、可回切的记录。
+ */
+const SESS_KEY = 'h3ui.sessions';
+const SESS_LEGACY_KEY = 'h3ui.session';   // 旧版单份草稿，首次加载时收编进对话
+const UI_KEY = 'h3ui.ui';                 // 左栏折叠 / 监控面板这类纯界面偏好
+
+function sessUid() { return 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+function emptyOptimize() {
+  return { en: '', zh: '', notes: '', thinking: '', mode: null, running: false,
+           system: '', user: '', runId: '', attachments: [], source: '', useZh: false };
+}
+function cloneOpt(o) { return JSON.parse(JSON.stringify(Object.assign(emptyOptimize(), o || {}))); }
+
+function activeSession() { return S.sessions.find(s => s.id === S.activeSession) || null; }
+function sessionById(id) { return S.sessions.find(s => s.id === id) || null; }
+
+/* ---- 作品库 → 恢复完整会话 ------------------------------------------------
+ *
+ * 一次任务失败（比如爆显存）在作品库里只留一条作业记录。以前那条记录只能看、不能改：
+ * 要重试就得凭记忆把提示词、参考素材、几十个参数再抄一遍 —— 而「刚才是哪个参数把它撑爆的」
+ * 恰恰是恢复时最想知道的事。现在作业记录里存了完整上下文（见 backend/jobs.py 的
+ * prompt_zh / prompt_source / mode / optimize），这里把它还原成一个**新对话**：
+ * 中文原文、优化结果、参考素材、全部生成参数都铺回创作页，改完直接重跑。
+ *
+ * 恢复是**非破坏性**的：当前对话先落盘，恢复出来的作业另开一个对话，随时能切回去。
+ */
+
+/* 作业 request 里与参数表单一一对应的键。不在这里的键，说明该参数没被这条作业记录过。 */
+const JOB_VALUE_KEYS = ['preset', 'width', 'height', 'num_frames', 'steps', 'seed',
+  'ref_image_short_edge', 'ref_video_short_edge', 'ref_video_max_pixels', 'vram_limit',
+  'activation_reserve', 'dit_onload', 'sdpa_backend', 'tile_size', 'tile_overlap', 'no_tiled',
+  'lora', 'lora_alpha', 'scheduler', 'beta_alpha', 'beta_beta', 'refresh_text_cache'];
+
+/* 从作业 request 还原出一整份参数：默认值打底 + 作业实际记下来的值。 */
+function valuesFromJobRequest(req) {
+  req = req || {};
+  const v = specDefaults();
+  JOB_VALUE_KEYS.forEach((k) => {
+    if (req[k] !== undefined && req[k] !== null) v[k] = req[k];
+  });
+  // 记录里的 preset 可能已经不存在了：形状仍然明确（上面已按实际值填过），别让下拉框悬空
+  if (!S.presets[v.preset]) v.preset = '';
+  const nf = Number(v.num_frames);
+  if (isFinite(nf) && nf > 0) v.seconds = Math.round(nf / FPS * 100) / 100;
+  return v;
+}
+
+/* 还原优化结果。关键在 source：它必须等于输入框里那行中文原文，
+   effectivePrompt() 才会认这份英文是「新鲜的」、重新把它送进流水线。 */
+function optimizeFromJobRequest(req) {
+  req = req || {};
+  const saved = req.optimize || {};
+  const usedEn = String(req.prompt_source || 'zh') === 'en';
+  const o = emptyOptimize();
+  o.en = saved.en || (usedEn ? String(req.prompt || '') : '');
+  o.zh = saved.zh || '';
+  o.notes = saved.notes || '';
+  o.mode = saved.mode || null;
+  o.runId = saved.runId || '';
+  o.useZh = !!saved.useZh;
+  // source 决定 effectivePrompt() 认不认这份英文「新鲜」：
+  //   - 作业当时用的是英文（prompt_source=en）-> 对齐到中文原文，恢复后英文仍会被送进流水线；
+  //   - 作业当时用的是中文（英文已失效，或用户点了「用中文原文重来」）-> 保留当初那份 source，
+  //     绝不能借 prompt_zh 把失效的英文「洗白」成新鲜结果。
+  o.source = usedEn ? String(req.prompt_zh || saved.source || '') : String(saved.source || '');
+  return o;
+}
+
+function refsFromJobRequest(req) {
+  return ((req || {}).refs || []).filter(r => r && r.path).map((r) => {
+    const ref = { kind: r.kind || 'image', path: r.path,
+                  name: r.name || String(r.path).split('/').pop(), uid: sessUid() };
+    ['w', 'h', 'frames', 'seconds', 'has_audio'].forEach((k) => {
+      if (r[k] !== undefined && r[k] !== null) ref[k] = r[k];
+    });
+    return ref;
+  });
+}
+
+function sessionFromJob(job) {
+  const req = (job && job.request) || {};
+  const usedEn = String(req.prompt_source || 'zh') === 'en';
+  // 老记录没有 prompt_zh：prompt 就是当时用的那一份，直接放进输入框（恢复出来仍是同一份文本）
+  const zh = String(req.prompt_zh || (usedEn ? '' : req.prompt) || '');
+  const s = newSessionRecord();
+  s.prompt = zh || String(req.prompt || '');
+  s.mode = req.mode || 'auto';
+  s.modeTab = req.mode_tab === 'edit' ? 'edit' : 'generate';
+  s.refs = refsFromJobRequest(req);
+  s.values = valuesFromJobRequest(req);
+  s.optimize = optimizeFromJobRequest(req);
+  s.ts = Date.now();
+  s.restoreInfo = {
+    jobId: job.id, status: job.status || 'unknown',
+    statusZh: job.stage_zh || job.status || '',
+    error: job.error || '', created: job.created || '',
+    // 旧记录（本次改动之前提交的）没有 prompt_source：不假装它是中文原文，照实说
+    promptSource: req.prompt_source === 'en' ? 'en'
+      : (req.prompt_source === 'zh' ? 'zh' : 'legacy'),
+  };
+  return s;
+}
+
+async function restoreJob(jobId) {
+  let job = null;
   try {
-    localStorage.setItem('h3ui.session', JSON.stringify({
-      prompt: $('prompt-input').value, values: S.values,
-      refs: S.refs.map(r => ({ kind: r.kind, path: r.path, name: r.name })), ts: Date.now(),
+    const r = await api('/api/jobs/' + encodeURIComponent(jobId));
+    job = (r && r.job) || null;
+  } catch (e) {
+    toast('读取作业失败：' + e.message, 'err', 8000);
+    return;
+  }
+  if (!job) { toast('作业不存在（服务重启后只保留最近 50 条记录）', 'err', 8000); return; }
+  captureSession();                       // 当前对话先落盘，恢复不会冲掉它
+  const s = sessionFromJob(job);
+  S.sessions.unshift(s);
+  S.activeSession = s.id;
+  applySession(s);
+  persistSessions();
+  renderSessionList();
+  selectView('create');
+  $('prompt-input').focus();
+  $('prompt-input').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  toast('已从作品库恢复作业 ' + job.id + '：提示词、参考素材与全部参数都铺回了创作页，' +
+    '改完参数点「开始生成」重新提交' + (job.error ? '（原失败原因见创作页顶部的提示）' : ''),
+    'ok', 10000);
+}
+
+/* 创作页顶部的「这是从作品库恢复来的」提示条：把原作业的失败原因摆在参数旁边，
+   调参时不用来回切页签猜上次是怎么挂的。 */
+function renderRestoreBanner(s) {
+  const host = $('restore-banner');
+  if (!host) return;
+  const info = s && s.restoreInfo;
+  if (!info) { host.hidden = true; host.className = 'restore-banner'; host.innerHTML = ''; return; }
+  host.hidden = false;
+  host.className = 'restore-banner' + (info.error ? ' err' : '');
+  host.innerHTML = '';
+  const head = el('div', 'rb-head');
+  head.appendChild(el('b', null, '已从作品库恢复作业 ' + info.jobId));
+  head.appendChild(el('span', 'rb-when', '原状态：' + (info.statusZh || info.status) +
+    (info.created ? ' · ' + fmtClock(info.created) : '')));
+  host.appendChild(head);
+  if (info.error) host.appendChild(el('div', 'rb-line', '失败原因：' + info.error));
+  const srcZh = info.promptSource === 'en' ? '英文优化结果'
+    : (info.promptSource === 'zh' ? '中文原文' : '该作业当时使用的提示词（旧记录未标注来源）');
+  host.appendChild(el('div', 'rb-line', '提示词（' + srcZh +
+    '）、参考素材与全部生成参数都已还原；改完参数点「开始生成」重新提交。'));
+  const ops = el('div', 'rb-ops');
+  const log = el('button', 'ghost-btn sm', '看原作业日志');
+  log.onclick = () => { openJobStream(info.jobId); toggleMonitor(true); };
+  ops.appendChild(log);
+  const close = el('button', 'ghost-btn sm', '知道了');
+  close.onclick = () => {
+    const cur = activeSession();
+    if (cur) { delete cur.restoreInfo; persistSessions(); }
+    renderRestoreBanner(cur);
+  };
+  ops.appendChild(close);
+  host.appendChild(ops);
+}
+
+function newSessionRecord() {
+  // values 先取当前值：新建对话不该把刚调好的参数又打回默认，但不带入上一份提示词/参考素材
+  return { id: sessUid(), title: '', renamed: false, ts: Date.now(), prompt: '',
+           mode: 'auto', modeTab: 'generate', refs: [], optimize: emptyOptimize(),
+           values: JSON.parse(JSON.stringify(S.values || {})) };
+}
+
+function autoTitle(prompt) {
+  const line = String(prompt || '').split('\n').map(x => x.trim()).filter(Boolean)[0] || '';
+  if (!line) return '新对话';
+  return line.length > 18 ? line.slice(0, 18) + '…' : line;
+}
+function sessionTitle(s) { return (s.renamed && s.title) ? s.title : autoTitle(s.prompt); }
+
+function fmtAgo(ts) {
+  const d = Math.max(0, Date.now() - (ts || 0));
+  if (d < 60000) return '刚刚';
+  if (d < 3600000) return Math.floor(d / 60000) + ' 分钟前';
+  if (d < 86400000) return Math.floor(d / 3600000) + ' 小时前';
+  return Math.floor(d / 86400000) + ' 天前';
+}
+function sessionMeta(s) {
+  const bits = [fmtAgo(s.ts)];
+  const n = (s.refs || []).length;
+  if (n) bits.push(n + ' 参考');
+  if (s.optimize && s.optimize.en) bits.push('已优化');
+  return bits.join(' · ');
+}
+
+/* 把当前界面上的状态写回活动对话。touch=false 用于定时兜底：不改「最后编辑时间」。 */
+function captureSession(touch) {
+  const s = activeSession();
+  if (!s) return;
+  s.prompt = $('prompt-input').value;
+  s.refs = S.refs.map(r => Object.assign({}, r));
+  s.optimize = cloneOpt(S.optimize);
+  s.mode = S.mode;
+  const tab = document.querySelector('.mode-tab.active');
+  s.modeTab = tab ? tab.dataset.mode : (s.modeTab || 'generate');
+  s.values = JSON.parse(JSON.stringify(S.values || {}));
+  if (touch !== false) s.ts = Date.now();
+  persistSessions();
+}
+
+let sessTimer = null;
+function scheduleSessionSave() {
+  clearTimeout(sessTimer);
+  sessTimer = setTimeout(() => { captureSession(); updateActiveSessionLabel(); }, 600);
+}
+
+let sessWarned = false;
+function persistSessions() {
+  const write = () => localStorage.setItem(SESS_KEY,
+    JSON.stringify({ v: 2, active: S.activeSession, items: S.sessions }));
+  try {
+    write();
+  } catch (e) {
+    // 配额不够时先丢历史对话里的「调试全文」（system/user/思考），提示词与参数一定保住
+    try {
+      S.sessions.forEach(s => {
+        if (s.optimize) { s.optimize.thinking = ''; s.optimize.system = ''; s.optimize.user = ''; }
+      });
+      write();
+      if (!sessWarned) {
+        sessWarned = true;
+        toast('浏览器存储接近上限：已清掉历史对话的调试全文（提示词与参数都还在）', 'warn', 9000);
+      }
+    } catch (e2) { /* 隐私模式等场景忽略 */ }
+  }
+}
+
+function normalizeSession(o) {
+  const s = newSessionRecord();
+  Object.assign(s, o);
+  s.id = o.id || s.id;
+  s.refs = Array.isArray(o.refs) ? o.refs : [];
+  s.values = (o.values && typeof o.values === 'object') ? o.values : {};
+  s.optimize = cloneOpt(o.optimize);
+  s.renamed = !!o.renamed;
+  s.ts = o.ts || Date.now();
+  return s;
+}
+
+function loadSessions() {
+  let data = null;
+  try { data = JSON.parse(localStorage.getItem(SESS_KEY) || 'null'); } catch (e) { data = null; }
+  if (data && data.v === 2 && Array.isArray(data.items) && data.items.length) {
+    S.sessions = data.items.filter(x => x && x.id).map(normalizeSession);
+    S.activeSession = (data.active && S.sessions.some(x => x.id === data.active))
+      ? data.active : S.sessions[0].id;
+  } else {
+    // 兼容旧版：此前只存了一份草稿 h3ui.session，把它收编成第一个对话再清掉
+    let old = null;
+    try { old = JSON.parse(localStorage.getItem(SESS_LEGACY_KEY) || 'null'); } catch (e) { old = null; }
+    const s = newSessionRecord();
+    if (old) {
+      s.prompt = old.prompt || '';
+      if (old.values && typeof old.values === 'object') s.values = Object.assign(s.values, old.values);
+      s.refs = Array.isArray(old.refs) ? old.refs : [];
+      s.ts = old.ts || Date.now();
+      try { localStorage.removeItem(SESS_LEGACY_KEY); } catch (e) { /* ignore */ }
+    }
+    S.sessions = [s];
+    S.activeSession = s.id;
+  }
+  if (!S.sessions.length) { const s = newSessionRecord(); S.sessions = [s]; S.activeSession = s.id; }
+}
+
+/* 把一份对话铺回界面：提示词、参考、优化结果、参数、编辑页签一个都不落下。 */
+function applySession(s) {
+  if (!s) return;
+  $('prompt-input').value = s.prompt || '';
+  S.refs = (s.refs || []).map(r => Object.assign({}, r, { uid: r.uid || sessUid() }));
+  renderRefs();
+  S.optimize = cloneOpt(s.optimize);
+  S.optimize.running = false;          // 上一次若在优化中被存下，恢复时不能把按钮锁死
+  S.mode = s.mode || 'auto';
+  if ($('sel-mode')) $('sel-mode').value = S.mode;
+  S.values = Object.assign({}, S.values, s.values || {});
+  syncInputsFromValues();
+  refreshShapeControls();
+  document.querySelectorAll('#preset-chips .chip').forEach(c =>
+    c.classList.toggle('active', c.dataset.preset === S.values.preset));
+  updateSummaries();
+  setPromptPanes();
+  $('prompt-card').hidden = !(S.optimize.en || S.optimize.zh || S.optimize.notes ||
+    S.optimize.thinking || S.optimize.system || S.optimize.user);
+  switchPane(S.ui.promptPane);
+  const tab = s.modeTab === 'edit' ? 'edit' : 'generate';
+  document.querySelectorAll('.mode-tab').forEach(x => x.classList.toggle('active', x.dataset.mode === tab));
+  const ob = $('btn-optimize');
+  if (ob) { ob.disabled = false; ob.textContent = '✦ 优化提示词'; }
+  const st = $('optimize-status');
+  if (st) {
+    st.className = 'optimize-status';
+    st.textContent = S.optimize.en
+      ? (s.restoreInfo ? '（这是从作品库恢复的优化结果）' : '（这是这个对话上次的优化结果）') : '';
+  }
+  updatePromptUse();
+  renderRestoreBanner(s);
+  scheduleEstimate();
+}
+
+function updateActiveSessionLabel() {
+  const host = $('session-list');
+  if (!host) return;
+  const s = activeSession();
+  if (!s) return;
+  const item = host.querySelector('.session-item[data-id="' + s.id + '"]');
+  if (!item) return;
+  const title = sessionTitle(s);
+  const t = item.querySelector('.s-title'); if (t) t.textContent = title;
+  const m = item.querySelector('.s-meta'); if (m) m.textContent = sessionMeta(s);
+  const a = item.querySelector('.s-avatar'); if (a) a.textContent = title.slice(0, 1) || '新';
+  item.title = title + '\n' + sessionMeta(s) + '\n（点一下切到这个对话）';
+}
+
+function renderSessionList() {
+  const host = $('session-list');
+  if (!host) return;
+  host.innerHTML = '';
+  S.sessions.forEach((s) => {
+    const title = sessionTitle(s);
+    const item = el('div', 'session-item' + (s.id === S.activeSession ? ' active' : ''));
+    item.dataset.id = s.id;
+    item.title = title + '\n' + sessionMeta(s) + '\n（点一下切到这个对话）';
+    item.appendChild(el('span', 's-avatar', title.slice(0, 1) || '新'));
+    const main = el('div', 's-main');
+    main.appendChild(el('div', 's-title', title));
+    main.appendChild(el('div', 's-meta', sessionMeta(s)));
+    item.appendChild(main);
+    const ops = el('div', 's-ops');
+    const rn = el('button', null, '✎'); rn.type = 'button'; rn.title = '重命名';
+    rn.onclick = (e) => { e.stopPropagation(); renameSession(s.id); };
+    const del = el('button', null, '✕'); del.type = 'button'; del.title = '删除这个对话';
+    del.onclick = (e) => { e.stopPropagation(); deleteSession(s.id); };
+    ops.appendChild(rn); ops.appendChild(del);
+    item.appendChild(ops);
+    item.onclick = () => openSession(s.id);
+    host.appendChild(item);
+  });
+}
+
+function openSession(id) {
+  if (id === S.activeSession) return;
+  captureSession();
+  const s = sessionById(id);
+  if (!s) return;
+  S.activeSession = id;
+  applySession(s);
+  persistSessions();
+  renderSessionList();
+  toast('已切到：' + sessionTitle(s), 'info', 2600);
+}
+
+function newSession() {
+  captureSession();
+  const s = newSessionRecord();
+  S.sessions.unshift(s);
+  S.activeSession = s.id;
+  applySession(s);
+  persistSessions();
+  renderSessionList();
+  $('prompt-input').focus();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  toast('已新建对话（旧对话在左栏，可随时切回）', 'ok', 3000);
+}
+
+function renameSession(id) {
+  const s = sessionById(id);
+  if (!s) return;
+  const name = prompt('重命名对话：', sessionTitle(s));
+  if (name === null) return;
+  const v = name.trim();
+  s.renamed = !!v;
+  s.title = v;
+  persistSessions();
+  if (id === S.activeSession) updateActiveSessionLabel(); else renderSessionList();
+  toast(v ? '已重命名为「' + v + '」' : '已恢复按内容自动取名', 'ok', 2600);
+}
+
+function deleteSession(id) {
+  const i = S.sessions.findIndex(x => x.id === id);
+  if (i < 0) return;
+  const s = S.sessions[i];
+  if (!window.confirm('删除对话「' + sessionTitle(s) + '」？删除后不可恢复。')) return;
+  S.sessions.splice(i, 1);
+  if (!S.sessions.length) S.sessions.push(newSessionRecord());   // 永远留一个可写的对话
+  if (S.activeSession === id) {
+    S.activeSession = S.sessions[Math.min(i, S.sessions.length - 1)].id;
+    applySession(activeSession());
+  }
+  persistSessions();
+  renderSessionList();
+  toast('已删除对话「' + sessionTitle(s) + '」', 'info', 2600);
+}
+
+function initSessions() {
+  loadSessions();
+  renderSessionList();
+  applySession(activeSession());
+}
+
+/* ------------------------------------------------------------------ 界面偏好（折叠 / 监控面板） */
+function saveUiPrefs() {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify({
+      railCollapsed: !!S.ui.railCollapsed, monitor: !!S.ui.monitor,
     }));
   } catch (e) { /* 隐私模式等场景忽略 */ }
 }
-setInterval(saveSession, 10000);
+function loadUiPrefs() {
+  let p = null;
+  try { p = JSON.parse(localStorage.getItem(UI_KEY) || 'null'); } catch (e) { p = null; }
+  if (p && typeof p === 'object') {
+    if (p.railCollapsed) S.ui.railCollapsed = true;
+    if (p.monitor === false) S.ui.monitor = false;
+  }
+}
+/* 折叠态不能只改宽度：文字收起、图标居中、按钮留在可视区内。这里把状态同步到 DOM 与无障碍属性。 */
+function applyRailState() {
+  const rail = $('rail'), btn = $('rail-toggle');
+  if (!rail) return;
+  rail.classList.toggle('collapsed', !!S.ui.railCollapsed);
+  if (btn) {
+    btn.setAttribute('aria-expanded', String(!S.ui.railCollapsed));
+    btn.title = S.ui.railCollapsed ? '展开侧栏' : '收起侧栏';
+  }
+}
+function toggleRail(force) {
+  S.ui.railCollapsed = (force === undefined) ? !S.ui.railCollapsed : !!force;
+  applyRailState();
+  saveUiPrefs();
+}
+
+// 定时兜底：万一某个改动没走到 scheduleSessionSave，也不会整段丢失（不改「最后编辑时间」）
+setInterval(() => captureSession(false), 15000);
 
 /* 前端异常也进日志面板：用户看到的报错和页面上的日志能对上，不用去猜。 */
 window.addEventListener('error', (e) => {

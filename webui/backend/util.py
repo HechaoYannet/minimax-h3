@@ -48,6 +48,22 @@ def iso(ts: float | None = None) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts if ts else now()))
 
 
+def parse_iso(s) -> float | None:
+    """iso() 的逆运算：'2026-09-19T09:20:21' -> epoch 秒；解析不了返回 None。
+
+    作业快照（job.json）里存的就是 iso() 写出来的本地时间串，重启加载时必须能读回来 ——
+    否则「时间」列只能填 now()，一次重启就会把所有历史记录的时间改成服务启动那一刻。
+    """
+    if isinstance(s, (int, float)) and not isinstance(s, bool):
+        return float(s)
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        return time.mktime(time.strptime(s, "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
 def human_dur(seconds: float | None) -> str:
     if seconds is None or seconds != seconds or seconds < 0:
         return "-"

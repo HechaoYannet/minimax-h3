@@ -15,14 +15,18 @@
 """
 from __future__ import annotations
 
+import contextlib
 import http.client
+import io
 import json
 import os
 import shutil
+import socket
 import struct
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.parse
@@ -483,6 +487,42 @@ class ServerEndpointTest(unittest.TestCase):
         self.assertIn(b"snapshot", resp.readline())
         self.assertIn(b"data:", resp.readline())
         conn.close()
+
+    def test_client_abort_is_not_a_traceback(self):
+        """对端甩连接（RST）只记一条 http.abort，不往 stderr 打整段 traceback。
+
+        复现浏览器关标签页 / 刷新 / 丢弃 keep-alive 连接的场景：SO_LINGER=0 让 close()
+        直接发 RST，服务端在 handle_one_request 里读请求行/请求头时抛
+        ConnectionResetError。老实现会由 socketserver.handle_error 原样打印 traceback
+        （它不经过 Handler.log_error），把真正的日志淹没。
+        """
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            s.sendall(b"GET /api/health HTTP/1.1\r\n")   # 半截请求：让服务端卡在 readline
+            time.sleep(0.2)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            s.close()
+            deadline = time.time() + 5
+            aborts: list[dict] = []
+            while time.time() < deadline and not aborts:
+                recs = self.app.log.query(n=200)["records"]
+                aborts = [r for r in recs if r.get("event") == "http.abort"]
+                time.sleep(0.05)
+        self.assertTrue(aborts, "对端断开没有记下 http.abort")
+        self.assertEqual(aborts[-1].get("ip"), "127.0.0.1")
+        self.assertEqual(buf.getvalue(), "", "连接重置不应该再打印 traceback")
+
+    def test_real_server_error_still_prints_traceback(self):
+        """只有「对端断开」这一类被吞掉；真正的服务端异常仍要留下 traceback。"""
+        buf = io.StringIO()
+        try:
+            raise RuntimeError("boom-for-test")
+        except RuntimeError:
+            with contextlib.redirect_stderr(buf):
+                self.httpd.handle_error(None, ("127.0.0.1", 1))
+        self.assertIn("RuntimeError", buf.getvalue())
+        self.assertIn("boom-for-test", buf.getvalue())
 
 
 # --------------------------------------------------------------------------- 优化路由端到端

@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import threading
 import time
 import traceback
@@ -1301,8 +1302,38 @@ def translate_path(p: str) -> str | None:
     return os.path.join(repo_root(), s)
 
 
+# --------------------------------------------------------------------------- 服务器
+class Server(ThreadingHTTPServer):
+    """对「客户端中途断开」免疫的 HTTP 服务器。
+
+    http.server 只捕获 socket.timeout：浏览器关标签页 / 刷新 / 丢弃 keep-alive
+    连接 / 局域网掉线时对端会发 RST，服务端在 handle_one_request 里读请求行就会抛
+    ConnectionResetError。异常冒到 socketserver.BaseServer.handle_error 后，那里
+    **不会**走 Handler.log_error，而是直接把整段 traceback（带 ---- 分割线）打到
+    stderr，把真正有用的日志淹没。
+
+    这些都只是网络噪声，不代表服务端出故障：统一降级成一条 debug 日志。
+    """
+
+    daemon_threads = True
+
+    # ConnectionResetError / ConnectionAbortedError / BrokenPipeError 都是它的子类
+    _CLIENT_ABORT = ConnectionError
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, self._CLIENT_ABORT):
+            log = getattr(APP, "log", None) if APP else None
+            if log:
+                log.debug(f"连接被对端中断：{exc!r}", source="http", event="http.abort",
+                          ip=str(client_address[0]) if isinstance(client_address, tuple)
+                          else str(client_address))
+            return
+        super().handle_error(request, client_address)
+
+
 # --------------------------------------------------------------------------- 启动
-def create(cfg: dict | None = None) -> tuple[App, ThreadingHTTPServer]:
+def create(cfg: dict | None = None) -> tuple[App, Server]:
     global APP
     cfg = cfg or cfgmod.server_config()
     APP = App(cfg)
@@ -1313,8 +1344,7 @@ def create(cfg: dict | None = None) -> tuple[App, ThreadingHTTPServer]:
     APP.telemetry.start()
     host = (cfg.get("server") or {}).get("host", "0.0.0.0")
     port = int((cfg.get("server") or {}).get("port", 8765))
-    httpd = ThreadingHTTPServer((host, port), Handler)
-    httpd.daemon_threads = True
+    httpd = Server((host, port), Handler)
     return APP, httpd
 
 

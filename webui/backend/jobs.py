@@ -24,7 +24,8 @@ import uuid
 
 from .estimate import estimate, risks
 from .runlog import BoundLog
-from .util import (append_jsonl, iso, now, read_json, safe_rel, tail_lines, write_json)
+from .util import (append_jsonl, iso, now, parse_iso, read_json, safe_rel, tail_lines,
+                   write_json)
 
 PROGRESS_PREFIX = "@@H3@@ "
 STAGES = [
@@ -107,10 +108,13 @@ class Job:
 
     # ---------------------------------------------------------------- 视图
     def to_dict(self, include_request: bool = True) -> dict:
-        req = dict(self.request) if include_request else {}
-        if not include_request:
-            # 只保留展示需要的字段
-            req = {k: req.get(k) for k in
+        # 完整 request 只在详情/恢复时给；列表（作品库、最近生成、作业卡）只要展示字段。
+        # 注意子集必须从 self.request 摘，不能从上面那个空 dict 摘 —— 否则每个字段都是 None，
+        # 页面上「形状/步数/种子」会一起变成问号。
+        if include_request:
+            req = dict(self.request)
+        else:
+            req = {k: self.request.get(k) for k in
                    ("prompt_excerpt", "width", "height", "num_frames", "steps", "seed",
                     "preset", "seconds")}
         est = self.request.get("_estimate") or {}
@@ -133,6 +137,20 @@ class Job:
 
     def snapshot(self):
         write_json(self.paths["job"], self.to_dict())
+
+
+def _last_write(paths: dict) -> float:
+    """作业被杀时来不及写 finished：拿快照 / 原始日志最后被写过的时间兜底。
+
+    这样「用时」是它实际跑过的时长，而不是从服务重启那一刻一直涨上去。
+    """
+    times = []
+    for p in (paths.get("job"), paths.get("log")):
+        try:
+            times.append(os.path.getmtime(p))
+        except OSError:
+            pass
+    return max(times) if times else now()
 
 
 class JobManager:
@@ -182,11 +200,17 @@ class JobManager:
         jdir = self.cfg["paths"]["jobs_dir"]
         if not os.path.isdir(jdir):
             return
-        for name in sorted(os.listdir(jdir))[-50:]:
+        # 先过滤出真正有 job.json 的目录再取最近 50 个。提交时为提示词建的 pending-* 目录
+        # 没有 job.json，但名字排在最前面；如果先切片再过滤，它们会把作业记录（作品库里
+        # 「恢复参数」的来源）整批挤出窗口 —— 重启后作品库会莫名变空。
+        names = [n for n in sorted(os.listdir(jdir))
+                 if os.path.isfile(os.path.join(jdir, n, "job.json"))]
+        for name in names[-50:]:
             meta = read_json(os.path.join(jdir, name, "job.json"))
             if not isinstance(meta, dict):
                 continue
-            if meta.get("status") in ("running", "queued"):
+            was_active = meta.get("status") in ("running", "queued")
+            if was_active:
                 meta["status"] = "interrupted"
                 meta["stage"] = "interrupted"
                 meta["error"] = meta.get("error") or "服务重启，作业已中断"
@@ -204,8 +228,15 @@ class JobManager:
             j.root = self.root
             j.status = meta.get("status", "unknown")
             j.stage = meta.get("stage", "unknown")
-            j.created = now()
-            j.started = j.finished = None
+            # 时间戳原样读回来 —— 这是这条记录自己的时间。以前这里写的是 now()、
+            # started/finished 直接丢掉，于是一次重启就把作品库里**所有**历史记录的
+            # 时间改成「本次服务启动时间」，用时还跟着 now() 一直涨。
+            j.created = parse_iso(meta.get("created")) or now()
+            j.started = parse_iso(meta.get("started"))
+            j.finished = parse_iso(meta.get("finished"))
+            if was_active and j.finished is None:
+                # 服务被杀那一刻没来得及写 finished：用最后写盘时间兜底
+                j.finished = max(j.started or j.created, _last_write(j.paths))
             j.step = meta.get("step") or 0
             j.total_steps = meta.get("total_steps") or 0
             j.step_s = meta.get("step_s")
@@ -590,6 +621,36 @@ def build_command(root: str, req: dict, prompt_path: str) -> list[str]:
     return cmd
 
 
+# --------------------------------------------------------------------------- 会话上下文持久化
+# 「作品库 → 恢复会话」的原料：作业记录里除了真正送进流水线的那一份提示词，
+# 还要留下用户当时写的中文原文、优化结果与编辑模式。否则事后恢复出来的只有一个
+# 无法继续调整的英文孤本 —— 而「到底哪个参数把它撑爆了」恰恰是恢复时最想知道的事。
+CTX_TEXT_CAP = 24000          # 单个文本字段上限（max_prompt_chars=12000，留一倍冗余）
+OPT_KEEP_KEYS = ("en", "zh", "notes", "mode", "source", "runId")
+
+
+def _cap_text(v) -> str:
+    return v[:CTX_TEXT_CAP] if isinstance(v, str) and v else ""
+
+
+def clean_optimize(raw) -> dict:
+    """只保留恢复会话要用的字段，并逐个封顶，避免把 system/思考全文塞进 job.json。
+
+    完整调试全文（system / user / 思考 / 模型原始输出）本来就有独立的 LLM 调用记录，
+    这里只留下 runId 作为通往那份记录的入口，job.json 保持小巧。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k in OPT_KEEP_KEYS:
+        v = raw.get(k)
+        if isinstance(v, str) and v:
+            out[k] = v[:CTX_TEXT_CAP]
+    if raw.get("useZh"):
+        out["useZh"] = True
+    return out
+
+
 def make_request(raw: dict, cfg: dict, spec: dict) -> tuple[dict, list[str], list[dict]]:
     """校验 + 归一化前端提交的请求。返回 (request, errors, warnings)。"""
     errors: list[str] = []
@@ -697,6 +758,15 @@ def make_request(raw: dict, cfg: dict, spec: dict) -> tuple[dict, list[str], lis
                                            "lora_alpha", "beta_alpha", "beta_beta") else int(v)
         except (TypeError, ValueError):
             errors.append(f"{k} 的取值 {v!r} 不是数字")
+
+    # 恢复完整会话所需的上下文（见 clean_optimize 的说明）。
+    # 老客户端不传这些字段时给稳定默认值：prompt_zh 回落到实际提示词，
+    # source 记为 zh —— 恢复出来仍是同一份文本，只是没有「中文原文 / 英文」的分层。
+    request["prompt_zh"] = _cap_text(raw.get("prompt_zh"))
+    request["prompt_source"] = "en" if raw.get("prompt_source") == "en" else "zh"
+    request["mode"] = (str(raw.get("mode") or "auto"))[:24]
+    request["mode_tab"] = "edit" if raw.get("mode_tab") == "edit" else "generate"
+    request["optimize"] = clean_optimize(raw.get("optimize"))
 
     if request["num_frames"] < 22:
         notes.append(f"帧数 {request['num_frames']} 低于实测可用下限 22：形状检查能过，"

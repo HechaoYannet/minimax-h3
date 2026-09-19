@@ -25,12 +25,24 @@ const no = (m) => { bad++; console.log('x ' + m); };
 const bodyStart = js.indexOf('function buildSubmitBody');
 const bodyEnd = js.indexOf('async function submitJob');
 const body = bodyStart >= 0 && bodyEnd > bodyStart ? js.slice(bodyStart, bodyEnd) : '';
+/* prompt / prompt_zh / prompt_source 必须来自**同一次** effectivePrompt()。
+   允许写成 const eff = effectivePrompt(); prompt: eff.text（作品库恢复也要用同一个 eff.zh），
+   但不允许任何一段绕过它去读输入框 —— 那正是「页面显示的」和「实际提交的」错开的老 bug。 */
+const effVar = body.match(/const\s+(\w+)\s*=\s*effectivePrompt\(\)/);
+const fromEff = (field) => {
+  const direct = new RegExp(field + ':\\s*effectivePrompt\\(\\)\\.\\w+').test(body);
+  const viaVar = effVar && new RegExp(field + ':\\s*' + effVar[1] + '\\.\\w+').test(body);
+  return direct || viaVar;
+};
 if (!body) no('找不到 buildSubmitBody');
-else if (!/prompt:\s*effectivePrompt\(\)\.text/.test(body)) {
+else if (!fromEff('prompt')) {
   no('buildSubmitBody 没有用 effectivePrompt() 取提示词，优化出来的英文不会进流水线');
 } else if (/prompt:\s*\$\('prompt-input'\)\.value/.test(body)) {
   no('buildSubmitBody 仍在直接读输入框（会和页面显示的那份错开）');
-} else ok('提交体的 prompt 来自 effectivePrompt()');
+} else if (!fromEff('prompt_zh') || !fromEff('prompt_source')) {
+  no('buildSubmitBody 的 prompt_zh / prompt_source 没有和 prompt 取自同一次 effectivePrompt()' +
+     '（作品库恢复时中文原文会与英文错位）');
+} else ok('提交体的 prompt / prompt_zh / prompt_source 来自同一次 effectivePrompt()');
 
 /* 优化时必须记下「这段英文是给哪份中文写的」 */
 if (!/source:\s*chinese/.test(js)) no('optimize() 没有记录 source（无法判断优化结果是否已失效）');

@@ -66,6 +66,9 @@ webui/
     test_disk.py               夸克网盘接入的离线自测（压缩包往返 / 转码 / 全部 /api/disk/*）
     test_disk_ui.js            网盘页签的静态自检（node：id 对账 / 按钮绑定 / 端点对账）
     test_prompt_flow.js        「优化出的英文有没有进流水线」的静态自检（node：提交路径 / 四条分支）
+    test_session_ui.js         「对话（会话）管理 + 左栏折叠态 + 页签切换」的静态/行为自检（node）
+    test_restore_job.js        「作品库 -> 恢复完整会话/参数」的静态 + 行为自检（node）
+    test_restore.py            后端：恢复上下文写进作业记录、重启后仍能读回（python，离线）
 
 docs/PARAMETERS.md             由 gen_params.py --write-docs 生成的参数参考手册
 docs/QUARK.md                  夸克网盘接入的设计与踩坑记录（CLI 环境判定、加密 zip、约束对齐）
@@ -190,7 +193,43 @@ conda 环境里本来就有），不引 FastAPI/uvicorn。实测后端常驻内�
 `test_prompt_flow.js` 钉住这条链路：`buildSubmitBody` 曾经直接读输入框，于是优化出的英文只停在页面上、
 提交给 `run_h3.sh` 的却是中文原文 —— 页面显示的和实际生成的是两份东西。
 
-### 3.3 其余端点
+### 3.3 对话（会话）管理（纯前端）
+
+左栏的「对话」列表把「一次创作的完整上下文」存成了可回切的记录：中文原文、参考素材、
+优化结果（英文 / 中文回译 / 结构说明 / 调试全文）、生成参数与编辑模式。**全部在浏览器
+`localStorage` 里，后端不参与** —— 刷新、关掉再打开都不丢，也不需要给后端加一套存储。
+
+- 新建 / 切换 / 重命名（✎）/ 删除（✕）都在左栏；当前对话高亮，标题默认取提示词首行（可重命名覆盖）。
+- 输入框、参考素材、参数、预设、优化结果任一改动都会**防抖自动保存**；关页面前再兜一次底。
+- 老版本只存了一份草稿（`h3ui.session`），首次加载会自动收编成第一个对话。
+- 存储写满时优先丢弃历史对话的「调试全文」（system / user / 思考），提示词与参数一定保住。
+
+同一套 localStorage 还存界面偏好：左栏折叠状态、右侧监控面板显隐（`h3ui.ui`）。
+
+### 3.4 从作品库恢复完整会话（失败也能改参数重跑）
+
+任务失败（最典型的是爆显存）在「作品库」里同样是一条记录，而且**不只是留一个墓碑**：
+每行操作列的「恢复参数」会把这条作业变回一个**新的对话** —— 中文原文、优化结果
+（英文 / 回译 / 结构说明 / `runId`）、参考素材、模式与生成/编辑页签、全部生成参数一项不落地
+铺回「创作」页，并停在这个作业当时的形状上，改完直接重新生成。
+
+- **为什么能恢复**：提交时后端把 `prompt_zh`（中文原文）/ `prompt_source` / `mode` /
+  `mode_tab` / `optimize` 一并写进 `job.json`（见 `backend/jobs.py` 的 `clean_optimize`）。
+  只存送进流水线的那一份英文，事后恢复出来就是一个无法继续调整的孤本 ——
+  而「刚才是哪个参数把它撑爆的」恰恰是恢复时最想知道的事。
+  `system` / `user` / 思考全文不进 `job.json`（它们有自己的 LLM 调用记录），只留 `runId` 当入口。
+- **恢复非破坏性**：当前对话先落盘，恢复出来的作业另开一个对话，左栏随时切回。
+- **创作页顶部有提示条**：写明原作业号、原状态与失败原因，并给「看原作业日志」直达。
+- **老记录**（本次改动之前提交的）没有中文原文与优化结果：恢复时把当时实际使用的那一份提示词
+  放回输入框，并如实标成「旧记录未标注来源」，不会伪造一份中文原文。
+- 作品库还有「只看未完成 / 失败」开关与「详情」：详情能看到提示词来源、形状、参数与失败原因，
+  恢复按钮就在详情弹窗里。
+
+> 顺带修掉一个让作品库「看不出内容」的老 bug：`Job.to_dict(include_request=False)` 从空字典里
+> 摘字段，列表里的 width / height / steps / seed 一直是 `None`（页面上显示成问号）。
+> 现在从 `self.request` 摘。
+
+### 3.5 其余端点
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -201,7 +240,7 @@ conda 环境里本来就有），不引 FastAPI/uvicorn。实测后端常驻内�
 | POST | `/api/preview` | 干跑：返回最终命令行与解析后的请求（不加载权重） |
 | POST | `/api/jobs` | 提交；带致命风险时返回 409 + `need_force`，前端弹二次确认 |
 | GET | `/api/jobs` | 作业列表 + 队列状态 |
-| GET | `/api/jobs/<id>` `/log` `/events` `/result` | 详情 / 原始日志 / 事件 / 产物路径（含 Windows 视角） |
+| GET | `/api/jobs/<id>` `/log` `/events` `/result` | 详情 / 原始日志 / 事件 / 产物路径（含 Windows 视角）。详情返回**完整 request**（中文原文 / 优化结果 / 参数），作品库的「恢复参数」靠它还原会话 |
 | POST | `/api/jobs/<id>/cancel` | 取消：先 SIGINT（当前步结束后退出），超时再 SIGKILL 整个进程组 |
 | POST | `/api/upload` | 上传参考素材，返回 WSL 内路径（并顺手 ffprobe 出尺寸/帧数） |
 | POST | `/api/paths` | 把 `D:\...` 之类的路径翻成 `/mnt/d/...` 并校验存在性 |
@@ -487,6 +526,25 @@ LLM 记录开关与保留份数）。**等级可以在页面上运行时就改**
 
 > 日志目录在 `cache/webui/` 下，已被 `.gitignore` 忽略 —— 提示词与产物路径不会误进版本库。
 
+### 8.6 客户端中途断开（Connection reset by peer）
+
+浏览器关标签页 / 刷新 / 丢弃 keep-alive 连接 / 局域网掉线时，对端会发 RST，服务端在
+`handle_one_request` 读请求行就会抛 `ConnectionResetError`。`http.server` 只捕
+`socket.timeout`，异常会一路冒到 `socketserver.handle_error` —— 那里**不经过**
+`Handler.log_error`，会直接把整段 traceback（带 `----` 分隔线）刷到 stderr，把真正的
+日志淹没。
+
+`backend/server.py` 的 `Server`（继承 `ThreadingHTTPServer`）重写了 `handle_error`：
+`ConnectionError` 一族（Reset / Aborted / BrokenPipe）只记一条 **debug** 记录
+（`source=http`、`event=http.abort`、带 `ip`），其余异常照旧交给 `socketserver`
+打印 traceback。效果：
+
+- 页面按 `event=http.abort` 能筛出「谁在什么时候甩了连接」，但不会污染默认视图；
+- stderr 里留下的 traceback 一定是真异常，不再被网络噪声淹没。
+
+回归用例：`webui/tools/test_logging.py::ServerEndpointTest` 的
+`test_client_abort_is_not_a_traceback` / `test_real_server_error_still_prints_traceback`。
+
 ---
 
 ## 9. 离线自测
@@ -515,6 +573,9 @@ node webui/tools/test_log_render.js webui/web/assets/app.js   # 日志行渲染�
 python3 webui/tools/test_disk.py                               # 压缩包往返 / 转码 / 全部 /api/disk/*
 node webui/tools/test_disk_ui.js                               # 网盘页签静态自检（可选）
 node webui/tools/test_prompt_flow.js                           # 「优化 -> 提交」提示词链路自检（可选）
+node webui/tools/test_session_ui.js                            # 对话管理 / 折叠态 / 页签切换自检（可选）
+node webui/tools/test_restore_job.js                           # 作品库「恢复会话/参数」链路自检（可选）
+python3 webui/tools/test_restore.py -v                         # 后端：恢复上下文写进作业记录 + 重启后读回（可选，离线）
 
 # 5) 真跑一次最便宜的档（约 1 分钟，含模型装载）
 curl -s -X POST http://127.0.0.1:8765/api/jobs -H 'Content-Type: application/json' \
